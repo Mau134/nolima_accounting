@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+dist/
+Output/
+.buildenv/
+*.nacc
+*.bak
+# never commit the private signing key or licence register
+NolimaLicenseVault/
+*.pem
+licence_register.db
+.pyibuild/
