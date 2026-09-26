@@ -41,18 +41,18 @@ class _Header(ttk.Frame):
 
 
 class InvoiceDialog(Dialog):
-    """kind: 'sale' | 'bill'; cash=True makes a cash sale (paid immediately)."""
+    """kind: 'sale' | 'bill' | 'quote'; cash=True makes a cash sale (paid immediately)."""
 
     def __init__(self, parent, books, kind="sale", cash=False):
-        title = "Cash sale" if cash else ("New invoice" if kind == "sale" else "New supplier bill")
-        super().__init__(parent, title, width=1000)
+        titles = {"sale": "New invoice", "bill": "New supplier bill", "quote": "New quotation"}
+        super().__init__(parent, "Cash sale" if cash else titles[kind], width=980)
         self.books, self.kind, self.cash = books, kind, cash
-        ckind = "customer" if kind == "sale" else "supplier"
-        self.ckind = ckind
+        sale_like = kind in ("sale", "quote")
+        self.ckind = "customer" if sale_like else "supplier"
         hdr = _Header(self.body)
         hdr.pack(fill="x")
         self.contact = tk.StringVar()
-        self.contact_cb = hdr.add("Customer" if kind == "sale" else "Supplier",
+        self.contact_cb = hdr.add("Customer" if sale_like else "Supplier",
                                   ttk.Combobox(hdr, textvariable=self.contact, state="readonly", width=30))
         ttk.Button(hdr, text="+ New", command=self.new_contact).grid(row=1, column=hdr.col, padx=(0, 16), pady=(2, 10))
         hdr.col += 1
@@ -60,30 +60,56 @@ class InvoiceDialog(Dialog):
         hdr.add("Date", ttk.Entry(hdr, textvariable=self.date, width=12))
         self.due = tk.StringVar(value=(date.today() + timedelta(days=30)).isoformat())
         if not cash:
-            hdr.add("Due date", ttk.Entry(hdr, textvariable=self.due, width=12))
+            hdr.add("Valid until" if kind == "quote" else "Due date", ttk.Entry(hdr, textvariable=self.due, width=12))
         self.ref = tk.StringVar()
-        hdr.add("Reference" if kind == "sale" else "Supplier invoice no.", ttk.Entry(hdr, textvariable=self.ref, width=16))
+        hdr.add("Reference" if sale_like else "Supplier invoice no.", ttk.Entry(hdr, textvariable=self.ref, width=16))
+        self.banks = [(a["id"], a["name"]) for a in books.bank_accounts()]
         if cash:
-            self.banks = [(a["id"], a["name"]) for a in books.bank_accounts()]
             self.bank = tk.StringVar(value=self.banks[0][1] if self.banks else "")
             hdr.add("Paid into", ttk.Combobox(hdr, textvariable=self.bank, values=[b[1] for b in self.banks],
                                               state="readonly", width=26))
+        opts = ttk.Frame(self.body, style="Card.TFrame")
+        opts.pack(fill="x")
+        self.levy_rate = books.levy_rate if sale_like else 0.0
+        self.levy_on = tk.BooleanVar(value=self.levy_rate > 0)
         self.inc = tk.BooleanVar(value=cash)
-        ttk.Checkbutton(self.body, text="Prices include VAT", variable=self.inc, style="Card.TCheckbutton",
-                        command=self.update_totals).pack(anchor="w")
-        self.lines = LinesEditor(self.body, books, "sale" if kind == "sale" else "bill")
+        inc_text = "Prices include VAT" + (" and levy" if self.levy_rate else "")
+        ttk.Checkbutton(opts, text=inc_text, variable=self.inc, style="Card.TCheckbutton",
+                        command=self.update_totals).pack(side="left")
+        if self.levy_rate:
+            ttk.Checkbutton(opts, text=f"Charge tourism levy ({self.levy_rate:g}%)", variable=self.levy_on,
+                            style="Card.TCheckbutton", command=self.update_totals).pack(side="left", padx=18)
+        self.lines = LinesEditor(self.body, books, "sale" if sale_like else "bill")
         self.lines.pack(fill="both", expand=True, pady=8)
+        self.lines.on_change = self.update_totals
         if kind == "bill":
             ttk.Label(self.body, text="Stock items bought go into Inventory. Their cost becomes an expense (cost of "
                                       "sales) when they are sold using the same item.", style="CardMuted.TLabel"
                       ).pack(anchor="w")
-        self.lines.on_change = self.update_totals
         self.memo = tk.StringVar()
         m = ttk.Frame(self.body, style="Card.TFrame")
-        m.pack(fill="x")
+        m.pack(fill="x", pady=(4, 0))
         ttk.Label(m, text="Notes", style="CardMuted.TLabel").pack(side="left")
         ttk.Entry(m, textvariable=self.memo).pack(side="left", fill="x", expand=True, padx=8)
-        self.totals = ttk.Label(self.buttons, text="", style="Card.TLabel", font=f(12, "bold"))
+        # part payment at the time of invoicing
+        self.paid_now = tk.StringVar()
+        if kind in ("sale", "bill") and not cash:
+            pp = ttk.Frame(self.body, style="Card.TFrame")
+            pp.pack(fill="x", pady=(8, 0))
+            ttk.Label(pp, text="Part payment now (optional)" if kind == "sale" else "Amount paid now (optional)",
+                      style="CardMuted.TLabel").pack(side="left")
+            ttk.Entry(pp, textvariable=self.paid_now, width=14).pack(side="left", padx=8)
+            self.pp_bank = tk.StringVar(value=self.banks[0][1] if self.banks else "")
+            ttk.Combobox(pp, textvariable=self.pp_bank, values=[b[1] for b in self.banks], state="readonly",
+                         width=26).pack(side="left", padx=4)
+            self.pp_method = tk.StringVar(value="Cash")
+            ttk.Combobox(pp, textvariable=self.pp_method, width=14,
+                         values=["Cash", "Bank transfer", "Airtel Money", "TNM Mpamba", "Cheque", "Card"]
+                         ).pack(side="left", padx=4)
+            ttk.Label(self.body, text="Leave blank if nothing is paid yet. Any amount less than the total is a part "
+                                      "payment; the rest stays as a balance due.", style="CardMuted.TLabel"
+                      ).pack(anchor="w", pady=(2, 0))
+        self.totals = ttk.Label(self.buttons, text="", style="Card.TLabel", font=f(11, "bold"))
         self.totals.pack(side="left")
         ttk.Button(self.buttons, text="Save and print", command=lambda: self.save(True)).pack(side="right")
         ttk.Button(self.buttons, text="Save", style="Primary.TButton", command=self.save).pack(side="right", padx=8)
@@ -107,37 +133,58 @@ class InvoiceDialog(Dialog):
             self.load_contacts(cid)
 
     def update_totals(self):
-        net = vat = 0.0
-        for l in self.lines.lines:
-            g = l["qty"] * l["unit_price"]
-            if self.inc.get() and l["vat_rate"]:
-                n = g / (1 + l["vat_rate"] / 100)
-                net, vat = net + n, vat + g - n
-            else:
-                net, vat = net + g, vat + g * l["vat_rate"] / 100
-        self.totals.configure(text=f"Subtotal {money(net)}    VAT {money(vat)}    Total MWK {money(net + vat)}")
+        if not self.lines.lines:
+            self.totals.configure(text="Total MWK 0.00")
+            return
+        try:
+            calc = self.books._calc_lines(self.lines.lines, self.inc.get(),
+                                          self.levy_rate if self.levy_on.get() else 0.0)
+        except AccError:
+            return
+        t = self.books.totals(calc)
+        parts = []
+        if t["discount"]:
+            parts.append(f"Discount {money(t['discount'])}")
+        parts += [f"Subtotal {money(t['subtotal'])}", f"VAT {money(t['vat'])}"]
+        if t["levy"]:
+            parts.append(f"Levy {money(t['levy'])}")
+        parts.append(f"Total MWK {money(t['total'])}")
+        self.totals.configure(text="    ".join(parts))
 
     def save(self, print_after=False):
         cid = next((c[0] for c in self.contacts if c[1] == self.contact.get()), None)
         try:
             if not valid_date(self.date.get()) or (not self.cash and not valid_date(self.due.get())):
                 raise AccError("Dates must be in the format YYYY-MM-DD.")
-            if self.cash:
+            levy = bool(self.levy_on.get())
+            if self.kind == "quote":
+                doc_id = self.books.create_quote(cid, self.date.get(), self.lines.lines, self.due.get(),
+                                                 self.memo.get(), self.ref.get(), self.inc.get(), levy)
+            elif self.cash:
                 bank = next((b[0] for b in self.banks if b[1] == self.bank.get()), None)
-                inv_id = self.books.cash_sale(cid, self.date.get(), self.lines.lines, bank, method=self.bank.get(),
+                doc_id = self.books.cash_sale(cid, self.date.get(), self.lines.lines, bank, method=self.bank.get(),
                                               reference=self.ref.get(), memo=self.memo.get(),
-                                              prices_inc_vat=self.inc.get())
+                                              prices_inc_vat=self.inc.get(), apply_levy=levy)
             else:
-                inv_id = self.books.create_invoice(self.kind, cid, self.date.get(), self.lines.lines,
+                paid = None
+                if self.paid_now.get().strip():
+                    amt = num(self.paid_now.get())
+                    if amt < 0:
+                        raise AccError("The amount paid now cannot be negative.")
+                    bank = next((b[0] for b in self.banks if b[1] == self.pp_bank.get()), None)
+                    paid = {"amount": amt, "account_id": bank, "method": self.pp_method.get(),
+                            "reference": self.ref.get()}
+                doc_id = self.books.create_invoice(self.kind, cid, self.date.get(), self.lines.lines,
                                                    due_date=self.due.get(), memo=self.memo.get(),
-                                                   reference=self.ref.get(), prices_inc_vat=self.inc.get())
-        except AccError as exc:
+                                                   reference=self.ref.get(), prices_inc_vat=self.inc.get(),
+                                                   apply_levy=levy, paid_now=paid)
+        except (AccError, ValueError) as exc:
             error(self, exc)
             return
-        self.result = inv_id
+        self.result = doc_id
         if print_after:
-            from ..printing import print_invoice
-            print_invoice(self.books, inv_id)
+            from .. import printing
+            (printing.print_quote if self.kind == "quote" else printing.print_invoice)(self.books, doc_id)
         self.destroy()
 
 
@@ -167,15 +214,22 @@ class PaymentDialog(Dialog):
         hdr2 = _Header(self.body)
         hdr2.pack(fill="x")
         self.amount = tk.StringVar()
-        e = hdr2.add("Amount (MWK)", ttk.Entry(hdr2, textvariable=self.amount, width=16))
+        e = hdr2.add("Amount settled (MWK)", ttk.Entry(hdr2, textvariable=self.amount, width=16))
         e.bind("<KeyRelease>", lambda ev: self.preview())
+        self.wht_rate = tk.StringVar(value="0%")
+        cb = hdr2.add("Withholding tax", ttk.Combobox(hdr2, textvariable=self.wht_rate, width=7, state="readonly",
+                                                      values=["0%", "3%", "10%", "20%"]))
+        cb.bind("<<ComboboxSelected>>", lambda ev: self.preview())
         self.method = tk.StringVar(value="Cash")
         hdr2.add("Method", ttk.Combobox(hdr2, textvariable=self.method, width=16,
                                         values=["Cash", "Bank transfer", "Cheque", "Airtel Money", "TNM Mpamba",
                                                 "Card", "Other"]))
         self.ref = tk.StringVar()
         hdr2.add("Reference", ttk.Entry(hdr2, textvariable=self.ref, width=20))
-        ttk.Label(self.body, text="Unpaid documents (payment is applied to the selected one first, then oldest first)",
+        self.cash_lbl = ttk.Label(self.body, text="", style="Card.TLabel", font=f(10, "bold"))
+        self.cash_lbl.pack(anchor="w")
+        ttk.Label(self.body, text="Unpaid documents. Enter less than the balance for a part payment; it is applied to "
+                                  "the selected document first, then oldest first.",
                   style="CardMuted.TLabel").pack(anchor="w", pady=(4, 4))
         self.table = Table(self.body, [("num", "Number", 110, "w"), ("date", "Date", 90, "w"),
                                        ("due", "Due", 90, "w"), ("total", "Total", 110, "e"),
@@ -223,7 +277,24 @@ class PaymentDialog(Dialog):
                 left -= a
         return out
 
+    def wht(self):
+        try:
+            settled = num(self.amount.get())
+        except ValueError:
+            return 0.0
+        rate = float(self.wht_rate.get().rstrip("%") or 0)
+        return round(settled * rate / 100, 2)
+
     def preview(self):
+        try:
+            settled = num(self.amount.get())
+        except ValueError:
+            settled = 0
+        w = self.wht()
+        word = "received" if self.kind == "receipt" else "paid"
+        who = "withheld by the customer" if self.kind == "receipt" else "deducted and owed to MRA"
+        self.cash_lbl.configure(text=f"Cash {word}: MWK {money(settled - w)}" +
+                                (f"    Withholding tax {who}: MWK {money(w)}" if w else ""))
         alloc = self.allocations()
         sel = self.table.selected()
         self.table.set_rows([[d["number"], d["date"], d["due_date"], money(d["total"]), money(d["balance"]),
@@ -237,9 +308,10 @@ class PaymentDialog(Dialog):
             if not valid_date(self.date.get()):
                 raise AccError("Dates must be in the format YYYY-MM-DD.")
             bank = next((b[0] for b in self.banks if b[1] == self.bank.get()), None)
+            w = self.wht()
             pid = self.books.record_payment(self.kind, self.contact_id(), self.date.get(), bank,
-                                            num(self.amount.get()), self.allocations(), self.method.get(),
-                                            self.ref.get())
+                                            round(num(self.amount.get()) - w, 2), self.allocations(),
+                                            self.method.get(), self.ref.get(), wht=w)
         except (AccError, ValueError) as exc:
             error(self, exc)
             return

@@ -67,7 +67,7 @@ class App:
                 return
             state["size"] = (w, h)
             box = (40, h * 0.5 - 190, w - 40, h * 0.5 + 150)
-            state["img"] = art.ImageTk.PhotoImage(art.compose_glass(w, h, [box], radius=24))
+            state["img"] = art.ImageTk.PhotoImage(art.compose_glass(w, h, (tuple(int(v) for v in box),), radius=24))
             side.delete("all")
             side.create_image(0, 0, image=state["img"], anchor="nw")
             cx = w / 2

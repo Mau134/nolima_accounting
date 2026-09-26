@@ -1,4 +1,4 @@
-# Nolima Accounting 1.0
+# Nolima Accounting 1.1
 
 ## Default login
 
@@ -12,6 +12,25 @@ administrator to choose a new password. Other staff get their own logins under *
 
 Professional double-entry accounting for any industry, by Nolima Tech Consultants.
 Python 3.10+ · Tkinter · SQLite · Ed25519-signed monthly licences.
+
+## Features
+
+Double-entry accounting for any industry: invoices, **quotations**, cash sales, supplier bills, receipts and
+payments (with **part payments**), expenses, transfers, bank reconciliation, stock with average costing,
+departments, VAT, **1% tourism levy**, **withholding tax**, **line discounts**, year-end close, users and roles,
+audit trail, backups, 13 reports (including **Tourism levy summary** and **Withholding tax summary**),
+printable documents with the company's **bank and mobile money details**, signed licences and remote updates.
+
+### Tax settings (Settings > Company)
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| VAT rate | 16.5% | Added to taxable lines |
+| Tourism levy | 1% | Added to every sale on the discounted net amount; posted to 2120 Tourism Levy Payable. Set 0 for businesses that do not charge it; can also be switched off per invoice |
+| Withholding tax | chosen per payment (0/3/10/20%) | Paying a supplier: deducted and posted to 2130 Withholding Tax Payable (paid to MRA annually). Receiving from a customer: posted to 1160 Withholding Tax Receivable |
+
+Company files from version 1.0 are upgraded automatically when opened: the new accounts, settings and item codes
+are added and nothing existing is changed.
 
 ## What's in the box
 
@@ -38,7 +57,7 @@ Python 3.10+ · Tkinter · SQLite · Ed25519-signed monthly licences.
    - It creates your signing key in `%USERPROFILE%\NolimaLicenseVault\` and writes the matching
      public key into `nolima_acc/license_pubkey.py`.
    - **Back up the vault folder** (flash disk + cloud). Lose it and you cannot renew existing customers.
-3. Build the installer: double-click `build\build_windows.bat` → `Output\NolimaAccounting-Setup-1.0.0.exe`
+3. Build the installer: double-click `build\build_windows.bat` → `Output\NolimaAccounting-Setup-1.1.0.exe`
    (or let GitHub build it; see **INSTALL.md**, which also covers installing at customers and moving to a new PC)
 
 Commit `license_pubkey.py` to GitHub; never commit the vault folder.

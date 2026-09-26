@@ -2,7 +2,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
@@ -70,10 +70,60 @@ CREATE TABLE IF NOT EXISTS stock_moves (
     id INTEGER PRIMARY KEY, item_id INTEGER REFERENCES items(id), date TEXT, qty REAL, unit_cost REAL,
     source_type TEXT, source_id INTEGER, memo TEXT);
 
+CREATE TABLE IF NOT EXISTS quotes (
+    id INTEGER PRIMARY KEY, number TEXT UNIQUE NOT NULL, contact_id INTEGER REFERENCES contacts(id),
+    date TEXT NOT NULL, valid_until TEXT, status TEXT DEFAULT 'open', subtotal REAL DEFAULT 0,
+    discount REAL DEFAULT 0, vat REAL DEFAULT 0, levy REAL DEFAULT 0, total REAL DEFAULT 0,
+    prices_inc_vat INTEGER DEFAULT 0, apply_levy INTEGER DEFAULT 1, memo TEXT, reference TEXT,
+    invoice_id INTEGER, created_by TEXT);
+
+CREATE TABLE IF NOT EXISTS quote_lines (
+    id INTEGER PRIMARY KEY, quote_id INTEGER NOT NULL REFERENCES quotes(id), item_id INTEGER REFERENCES items(id),
+    description TEXT, qty REAL DEFAULT 1, unit_price REAL DEFAULT 0, discount_pct REAL DEFAULT 0,
+    discount_amt REAL DEFAULT 0, vat_rate REAL DEFAULT 0, account_id INTEGER REFERENCES accounts(id),
+    department_id INTEGER REFERENCES departments(id), net REAL DEFAULT 0, vat REAL DEFAULT 0, levy REAL DEFAULT 0);
+
 CREATE TABLE IF NOT EXISTS reconciliations (
     id INTEGER PRIMARY KEY, account_id INTEGER REFERENCES accounts(id), statement_date TEXT,
     statement_balance REAL, created_by TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 """
+
+
+# columns added after version 1; added to older company files on open
+COLUMNS = {
+    "invoice_lines": [("discount_pct", "REAL DEFAULT 0"), ("discount_amt", "REAL DEFAULT 0"),
+                      ("levy", "REAL DEFAULT 0")],
+    "invoices": [("discount", "REAL DEFAULT 0"), ("levy", "REAL DEFAULT 0")],
+    "payments": [("wht", "REAL DEFAULT 0")],
+}
+
+INDEXES = """
+CREATE INDEX IF NOT EXISTS ix_entries_date ON journal_entries(date);
+CREATE INDEX IF NOT EXISTS ix_entries_source ON journal_entries(source_type, source_id);
+CREATE INDEX IF NOT EXISTS ix_lines_dept ON journal_lines(department_id);
+CREATE INDEX IF NOT EXISTS ix_invoices_kind ON invoices(kind, status, date);
+CREATE INDEX IF NOT EXISTS ix_invoices_contact ON invoices(contact_id);
+CREATE INDEX IF NOT EXISTS ix_invlines_invoice ON invoice_lines(invoice_id);
+CREATE INDEX IF NOT EXISTS ix_payments_kind ON payments(kind, date);
+CREATE INDEX IF NOT EXISTS ix_payments_contact ON payments(contact_id);
+CREATE INDEX IF NOT EXISTS ix_alloc_payment ON allocations(payment_id);
+CREATE INDEX IF NOT EXISTS ix_alloc_invoice ON allocations(invoice_id);
+CREATE INDEX IF NOT EXISTS ix_moves_item ON stock_moves(item_id);
+CREATE INDEX IF NOT EXISTS ix_quotes_contact ON quotes(contact_id);
+CREATE INDEX IF NOT EXISTS ix_quotelines_quote ON quote_lines(quote_id);
+"""
+
+
+def migrate(conn):
+    for table, cols in COLUMNS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in cols:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    conn.executescript(INDEXES)
+    conn.execute("INSERT INTO settings(key, value) VALUES('schema_version', ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
+    conn.commit()
 
 
 def connect(path) -> sqlite3.Connection:
@@ -82,7 +132,11 @@ def connect(path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA cache_size = -32000")
     conn.executescript(SCHEMA)
+    migrate(conn)
     cur = conn.execute("SELECT value FROM settings WHERE key='schema_version'")
     if cur.fetchone() is None:
         conn.execute("INSERT INTO settings(key, value) VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))

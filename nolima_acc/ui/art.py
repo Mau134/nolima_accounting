@@ -201,51 +201,64 @@ def install_skins(style, C):
 # ---------------------------------------------------------------- glass
 @lru_cache(maxsize=4)
 def glass_backdrop(w, h):
-    """Deep navy gradient with blurred colour blobs: the scene the glass panels float over."""
-    img = Image.new("RGB", (w, h))
-    d = ImageDraw.Draw(img)
+    """Deep navy gradient with blurred colour blobs: the scene the glass panels float over.
+    Drawn at quarter size and scaled up: it is all soft blur, so nothing is lost and it is much faster."""
+    q = 4
+    sw, sh = max(8, w // q), max(8, h // q)
+    grad = Image.new("RGB", (1, 256))
     a, b = _hex("#0B2340"), _hex("#0E3B4A")
-    for y in range(h):
-        k = y / max(1, h - 1)
-        d.line([(0, y), (w, y)], fill=tuple(int(a[i] + (b[i] - a[i]) * k) for i in range(3)))
-    blobs = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    for y in range(256):
+        k = y / 255
+        grad.putpixel((0, y), tuple(int(a[i] + (b[i] - a[i]) * k) for i in range(3)))
+    img = grad.resize((sw, sh), Image.BILINEAR).convert("RGBA")
+    blobs = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
     bd = ImageDraw.Draw(blobs)
     for cx, cy, r, col in ((.12, .18, .30, "#10B981"), (.80, .10, .28, "#3B82F6"), (.62, .78, .34, "#8B5CF6"),
                            (.18, .92, .26, "#06B6D4"), (.95, .62, .22, "#EC4899")):
-        R = int(r * max(w, h) * 0.55)
-        bd.ellipse([cx * w - R, cy * h - R, cx * w + R, cy * h + R], fill=_hex(col, 150))
-    blobs = blobs.filter(ImageFilter.GaussianBlur(max(w, h) * 0.07))
-    return Image.alpha_composite(img.convert("RGBA"), blobs)
+        R = int(r * max(sw, sh) * 0.55)
+        bd.ellipse([cx * sw - R, cy * sh - R, cx * sw + R, cy * sh + R], fill=_hex(col, 150))
+    blobs = blobs.filter(ImageFilter.GaussianBlur(max(sw, sh) * 0.07))
+    return Image.alpha_composite(img, blobs).resize((w, h), Image.BICUBIC)
 
 
+@lru_cache(maxsize=4)
+def _frosted(w, h):
+    """The whole backdrop blurred once; every glass panel is cut from it."""
+    small = glass_backdrop(w, h).resize((max(4, w // 2), max(4, h // 2)), Image.BILINEAR)
+    return small.filter(ImageFilter.GaussianBlur(7)).resize((w, h), Image.BILINEAR)
+
+
+@lru_cache(maxsize=6)
 def compose_glass(w, h, boxes, radius=18):
-    """Backdrop with frosted-glass panels at each (x0, y0, x1, y1) box."""
+    """Backdrop with frosted-glass panels at each (x0, y0, x1, y1) box.
+    Blurs happen once per window size (not once per panel) and results are cached."""
+    boxes = tuple(tuple(int(v) for v in b) for b in boxes)
     base = glass_backdrop(w, h).copy()
+    frosted = _frosted(w, h)
+    sh = Image.new("L", (max(4, w // 2), max(4, h // 2)), 0)
+    sd = ImageDraw.Draw(sh)
     for (x0, y0, x1, y1) in boxes:
-        x0, y0, x1, y1 = map(int, (x0, y0, x1, y1))
+        if x1 - x0 >= 4 and y1 - y0 >= 4:
+            sd.rounded_rectangle([(x0 + 2) // 2, (y0 + 8) // 2, (x1 + 2) // 2, (y1 + 10) // 2], radius // 2, fill=70)
+    sh = sh.filter(ImageFilter.GaussianBlur(5)).resize((w, h), Image.BILINEAR)
+    base = Image.composite(Image.new("RGBA", (w, h), (3, 12, 28, 255)), base, sh)
+    for (x0, y0, x1, y1) in boxes:
         if x1 - x0 < 4 or y1 - y0 < 4:
             continue
-        region = base.crop((x0, y0, x1, y1)).filter(ImageFilter.GaussianBlur(14))
-        frost = Image.new("RGBA", region.size, (255, 255, 255, 34))
-        region = Image.alpha_composite(region, frost)
+        region = Image.alpha_composite(frosted.crop((x0, y0, x1, y1)),
+                                       Image.new("RGBA", (x1 - x0, y1 - y0), (255, 255, 255, 34)))
         mask = Image.new("L", (region.width * 2, region.height * 2), 0)
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, mask.width - 1, mask.height - 1], radius * 2, fill=255)
-        mask = mask.resize(region.size, Image.LANCZOS)
-        # soft shadow under the panel
-        sh = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        ImageDraw.Draw(sh).rounded_rectangle([x0 + 2, y0 + 8, x1 + 2, y1 + 10], radius, fill=(3, 12, 28, 70))
-        base = Image.alpha_composite(base, sh.filter(ImageFilter.GaussianBlur(10)))
+        mask = mask.resize(region.size, Image.BILINEAR)
         base.paste(region, (x0, y0), mask)
-        edge = Image.new("RGBA", ((x1 - x0) * 2, (y1 - y0) * 2), (0, 0, 0, 0))
+        edge = Image.new("RGBA", region.size, (0, 0, 0, 0))
         ed = ImageDraw.Draw(edge)
-        ed.rounded_rectangle([1, 1, edge.width - 2, edge.height - 2], radius * 2, outline=(255, 255, 255, 90), width=2)
-        # light falls from the top: a soft gradient instead of a hard band
+        ed.rounded_rectangle([0, 0, edge.width - 1, edge.height - 1], radius, outline=(255, 255, 255, 90), width=1)
         hh = max(2, edge.height // 3)
         for yy in range(hh):
             a = int(16 * (1 - yy / hh) ** 2)
             if a:
-                ed.line([(radius, 2 + yy), (edge.width - radius, 2 + yy)], fill=(255, 255, 255, a))
-        edge = edge.resize(region.size, Image.LANCZOS)
+                ed.line([(radius // 2, 1 + yy), (edge.width - radius // 2, 1 + yy)], fill=(255, 255, 255, a))
         base.alpha_composite(edge, (x0, y0))
     return base
 

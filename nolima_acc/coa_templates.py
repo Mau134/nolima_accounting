@@ -12,6 +12,7 @@ BASE = [
     ("1020", "Mobile Money (Airtel Money / TNM Mpamba)", "asset", "bank"),
     ("1100", "Accounts Receivable (Debtors)", "asset", "receivable"),
     ("1150", "VAT Input (Recoverable)", "asset", "vat_input"),
+    ("1160", "Withholding Tax Receivable (certificates)", "asset", "wht_receivable"),
     ("1200", "Inventory", "asset", "inventory"),
     ("1300", "Prepayments", "asset", "other"),
     ("1500", "Furniture and Fittings", "asset", "fixed_asset"),
@@ -21,6 +22,8 @@ BASE = [
     # Liabilities
     ("2000", "Accounts Payable (Creditors)", "liability", "payable"),
     ("2100", "VAT Output (Payable to MRA)", "liability", "vat_output"),
+    ("2120", "Tourism Levy Payable", "liability", "tourism_levy"),
+    ("2130", "Withholding Tax Payable (annual)", "liability", "wht_payable"),
     ("2150", "PAYE Payable", "liability", "other"),
     ("2200", "Accrued Expenses", "liability", "other"),
     ("2300", "Customer Deposits", "liability", "other"),

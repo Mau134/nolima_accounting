@@ -331,7 +331,8 @@ class LinesEditor(ttk.Frame):
 
         row = ttk.Frame(self, style="Card.TFrame")
         row.pack(fill="x", pady=(0, 6))
-        self.v = {k: tk.StringVar() for k in ("item", "desc", "acct", "qty", "price", "vat", "dept", "dr", "cr")}
+        self.v = {k: tk.StringVar() for k in ("item", "desc", "acct", "qty", "price", "vat", "dept", "dr", "cr",
+                                              "disc")}
         col = 0
 
         def add(label, widget, width=None):
@@ -342,12 +343,12 @@ class LinesEditor(ttk.Frame):
 
         if self.item_opts:
             cb = ttk.Combobox(row, textvariable=self.v["item"], values=[o[1] for o in self.item_opts],
-                              state="readonly", width=18)
+                              state="readonly", width=15)
             cb.bind("<<ComboboxSelected>>", self._item_chosen)
             add("Item", cb)
-        add("Description", ttk.Entry(row, textvariable=self.v["desc"], width=20))
+        add("Description", ttk.Entry(row, textvariable=self.v["desc"], width=15))
         add("Account", ttk.Combobox(row, textvariable=self.v["acct"], values=[o[1] for o in self.acct_opts],
-                                    state="readonly", width=22))
+                                    state="readonly", width=19))
         if mode == "journal":
             add("Debit", ttk.Entry(row, textvariable=self.v["dr"], width=12))
             add("Credit", ttk.Entry(row, textvariable=self.v["cr"], width=12))
@@ -356,11 +357,12 @@ class LinesEditor(ttk.Frame):
             add("VAT", ttk.Combobox(row, textvariable=self.v["vat"], values=self.vat_opts, width=7, state="readonly"))
         else:
             add("Qty", ttk.Entry(row, textvariable=self.v["qty"], width=6))
-            add("Unit price", ttk.Entry(row, textvariable=self.v["price"], width=12))
+            add("Unit price", ttk.Entry(row, textvariable=self.v["price"], width=10))
+            add("Disc %", ttk.Entry(row, textvariable=self.v["disc"], width=5))
             add("VAT", ttk.Combobox(row, textvariable=self.v["vat"], values=self.vat_opts, width=7, state="readonly"))
         if self.show_depts:
             add("Department", ttk.Combobox(row, textvariable=self.v["dept"], values=[o[1] for o in self.dept_opts],
-                                           state="readonly", width=12))
+                                           state="readonly", width=11))
         ttk.Button(row, text="Add line", style="Primary.TButton", command=self.add_line).grid(row=1, column=col, padx=4)
         self.v["qty"].set("1")
         self.v["vat"].set(self.vat_opts[0])
@@ -373,7 +375,8 @@ class LinesEditor(ttk.Frame):
                     ("vat", "VAT", 60, "center")]
         else:
             cols = [("desc", "Description", 220, "w"), ("acct", "Account", 200, "w"), ("qty", "Qty", 60, "e"),
-                    ("price", "Unit price", 100, "e"), ("vat", "VAT", 60, "center"), ("amt", "Amount", 110, "e")]
+                    ("price", "Unit price", 100, "e"), ("disc", "Disc", 60, "e"), ("vat", "VAT", 60, "center"),
+                    ("amt", "Amount", 110, "e")]
         if self.show_depts:
             cols.append(("dept", "Department", 110, "w"))
         self.table = Table(self, cols, height=6)
@@ -425,14 +428,17 @@ class LinesEditor(ttk.Frame):
                 if not acct and not item_id:
                     raise ValueError("Choose an item or an account.")
                 qty, price = num(self.v["qty"].get(), 1), num(self.v["price"].get())
+                disc = num(self.v["disc"].get().rstrip("%"), 0)
                 if qty <= 0:
                     raise ValueError("Quantity must be greater than zero.")
-                line.update(qty=qty, unit_price=price, vat_rate=rate)
+                if not 0 <= disc <= 100:
+                    raise ValueError("Discount must be between 0 and 100 percent.")
+                line.update(qty=qty, unit_price=price, vat_rate=rate, discount_pct=disc)
         except ValueError as exc:
             error(self, exc)
             return
         self.lines.append(line)
-        for k in ("item", "desc", "price", "dr", "cr"):
+        for k in ("item", "desc", "price", "dr", "cr", "disc"):
             self.v[k].set("")
         self.v["qty"].set("1")
         self.refresh()
@@ -453,8 +459,9 @@ class LinesEditor(ttk.Frame):
             elif self.mode == "expense":
                 r = [acct, l["description"], money(l["amount"]), f"{l['vat_rate']:g}%"]
             else:
-                r = [l["description"], acct, f"{l['qty']:g}", money(l["unit_price"]), f"{l['vat_rate']:g}%",
-                     money(l["qty"] * l["unit_price"])]
+                d = l.get("discount_pct") or 0
+                r = [l["description"], acct, f"{l['qty']:g}", money(l["unit_price"]), f"{d:g}%" if d else "",
+                     f"{l['vat_rate']:g}%", money(l["qty"] * l["unit_price"] * (1 - d / 100))]
             if self.show_depts:
                 r.append(dept)
             rows.append(r)

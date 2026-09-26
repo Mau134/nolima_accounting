@@ -41,6 +41,9 @@ class Page(ttk.Frame):
         pass
 
 
+LIST_LIMIT = 500  # rows shown per list; searching reaches older records
+
+
 def search_bar(parent, on_change, extra=None):
     bar = ttk.Frame(parent, style="Card.TFrame")
     bar.pack(fill="x", pady=(0, 8))
@@ -48,7 +51,13 @@ def search_bar(parent, on_change, extra=None):
     ttk.Label(bar, text="Search", style="CardMuted.TLabel").pack(side="left")
     e = ttk.Entry(bar, textvariable=v, width=22)
     e.pack(side="left", padx=8)
-    e.bind("<KeyRelease>", lambda ev: on_change())
+    job = {"id": None}
+
+    def later(_ev=None):  # wait until typing pauses instead of reloading on every key
+        if job["id"]:
+            bar.after_cancel(job["id"])
+        job["id"] = bar.after(300, on_change)
+    e.bind("<KeyRelease>", later)
     if extra:
         extra(bar)
     return v, bar
@@ -82,7 +91,6 @@ class DashboardPage(ttk.Frame):
 
     def refresh(self):
         self.data = self.books.dashboard()
-        self._size = (0, 0)
         self._schedule()
 
     def _schedule(self):
@@ -120,7 +128,7 @@ class DashboardPage(ttk.Frame):
         L = self._layout(W, H)
         boxes = L["kpis"] + [L["chart"], L["banks"], L["recent"]]
         if self._size != (W, H):
-            img = self.art.compose_glass(W, H, boxes)
+            img = self.art.compose_glass(W, H, tuple(tuple(int(v) for v in b) for b in boxes))
             self._bg = self.art.ImageTk.PhotoImage(img)
             self._size = (W, H)
         cv, d = self.cv, self.data
@@ -268,6 +276,8 @@ class DocumentsPage(Page):
                 self.action("Cash sale", lambda: self.app.open_dialog(InvoiceDialog, "sale", True))
             self.action("Receive payment" if sale else "Pay supplier",
                         lambda: self.app.open_dialog(PaymentDialog, self.pkind))
+            if sale:
+                self.action("New quotation", lambda: self.app.open_dialog(InvoiceDialog, "quote"))
             self.action("New invoice" if sale else "New bill", lambda: self.app.open_dialog(InvoiceDialog, self.kind), True)
         nb = ColorTabs(self)
         nb.pack(fill="both", expand=True)
@@ -278,14 +288,14 @@ class DocumentsPage(Page):
 
         def extra(bar):
             ttk.Label(bar, text="Show", style="CardMuted.TLabel").pack(side="left", padx=(12, 4))
-            cb = ttk.Combobox(bar, textvariable=self.status, values=["All", "Unpaid", "Paid", "Void"], width=10,
-                              state="readonly")
+            cb = ttk.Combobox(bar, textvariable=self.status, values=["All", "Unpaid", "Part paid", "Paid", "Void"],
+                              width=10, state="readonly")
             cb.pack(side="left")
-            cb.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+            cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_docs())
             for text, cmd in [("Print", self.print_doc), ("Record payment", self.pay_doc), ("View entry", self.view_entry),
                               ("Void", self.void_doc)]:
                 ttk.Button(bar, text=text, command=self._safe(cmd)).pack(side="right", padx=3)
-        self.search, _ = search_bar(t1, self.refresh, extra)
+        self.search, _ = search_bar(t1, self.refresh_docs, extra)
         self.docs = Table(t1, [("num", "Number", 110, "w"), ("date", "Date", 95, "w"), ("due", "Due", 95, "w"),
                                ("c", "Customer" if sale else "Supplier", 240, "w"), ("ref", "Reference", 120, "w"),
                                ("tot", "Total", 120, "e"), ("bal", "Balance", 120, "e"), ("st", "Status", 80, "center")],
@@ -298,7 +308,7 @@ class DocumentsPage(Page):
         def extra2(bar):
             ttk.Button(bar, text="Void", command=self._safe(self.void_payment)).pack(side="right", padx=3)
             ttk.Button(bar, text="Print", command=self._safe(self.print_payment)).pack(side="right", padx=3)
-        self.psearch, _ = search_bar(t2, self.refresh, extra2)
+        self.psearch, _ = search_bar(t2, self.refresh_pays, extra2)
         self.pays = Table(t2, [("num", "Number", 110, "w"), ("date", "Date", 95, "w"), ("c", "Name", 240, "w"),
                                ("acc", "Account", 200, "w"), ("m", "Method", 110, "w"), ("ref", "Reference", 120, "w"),
                                ("amt", "Amount", 120, "e"), ("st", "Status", 80, "center")], money_cols=["amt"])
@@ -312,27 +322,94 @@ class DocumentsPage(Page):
             ttk.Button(bar, text="Edit", command=self._safe(self.edit_contact)).pack(side="right", padx=3)
             ttk.Button(bar, text=f"New {self.ckind}", style="Primary.TButton",
                        command=self._safe(self.new_contact)).pack(side="right", padx=3)
-        self.csearch, _ = search_bar(t3, self.refresh, extra3)
+        self.csearch, _ = search_bar(t3, self.refresh_contacts, extra3)
         self.cons = Table(t3, [("n", "Name", 260, "w"), ("p", "Phone", 140, "w"), ("e", "Email", 220, "w"),
                                ("t", "TPIN", 110, "w"), ("b", "Balance", 130, "e")],
                           on_double=lambda i: self.edit_contact(), money_cols=["b"])
         self.cons.pack(fill="both", expand=True)
+        self.quotes = None
+        if sale:
+            t4 = Card(nb)
+            nb.add(t4, text="Quotations")
+
+            def extra4(bar):
+                for text, cmd in [("Cancel", lambda: self.quote_status("cancelled")),
+                                  ("Declined", lambda: self.quote_status("declined")),
+                                  ("Accepted", lambda: self.quote_status("accepted")),
+                                  ("Print", self.print_quote), ("Convert to invoice", self.convert_quote)]:
+                    ttk.Button(bar, text=text, command=self._safe(cmd),
+                               style="Primary.TButton" if text.startswith("Convert") else "TButton"
+                               ).pack(side="right", padx=3)
+            self.qsearch, _ = search_bar(t4, self.refresh_quotes, extra4)
+            self.quotes = Table(t4, [("num", "Number", 110, "w"), ("date", "Date", 95, "w"),
+                                     ("valid", "Valid until", 95, "w"), ("c", "Customer", 240, "w"),
+                                     ("ref", "Reference", 120, "w"), ("tot", "Total", 120, "e"),
+                                     ("st", "Status", 90, "center")],
+                                on_double=lambda i: self.print_quote(), money_cols=["tot"])
+            self.quotes.pack(fill="both", expand=True)
+        self.tabs = nb
+        nb.bind("<<TabChanged>>", lambda e: self.refresh())
 
     def refresh(self):
-        st = {"All": None, "Unpaid": "unpaid", "Paid": "paid", "Void": "void"}[self.status.get()]
-        rows = self.books.invoices(self.kind, st, search=self.search.get())
+        # only the visible tab is reloaded: fewer queries, faster page
+        i = self.tabs.index or 0
+        [self.refresh_docs, self.refresh_pays, self.refresh_contacts, self.refresh_quotes][i]()
+
+    def refresh_quotes(self):
+        if not self.quotes:
+            return
+        today = date.today().isoformat()
+        rows = self.books.quotes(search=self.qsearch.get(), limit=LIST_LIMIT)
+        self.quotes.set_rows([[q["number"], q["date"], q["valid_until"], q["contact"], q["reference"], q["total"],
+                               ("Expired" if q["status"] == "open" and (q["valid_until"] or "") < today
+                                else q["status"].title())] for q in rows],
+                             ids=[q["id"] for q in rows],
+                             tags=[("muted",) if q["status"] in ("invoiced", "cancelled", "declined") else ()
+                                   for q in rows])
+
+    def _quote(self):
+        i = self.quotes.selected()
+        if not i:
+            raise AccError("Select a quotation first.")
+        return int(i)
+
+    def print_quote(self):
+        printing.print_quote(self.books, self._quote())
+
+    def quote_status(self, status):
+        self.books.set_quote_status(self._quote(), status)
+        self.refresh_quotes()
+
+    def convert_quote(self):
+        q = self.books.quote(self._quote())
+        if confirm(self, f"Create an invoice from quotation {q['number']} for MWK {money(q['total'])}?"):
+            inv = self.books.convert_quote(q["id"])
+            self.refresh_quotes()
+            if confirm(self, "Invoice created. Print it now?"):
+                printing.print_invoice(self.books, inv)
+
+    def refresh_docs(self):
+        st = {"All": None, "Unpaid": "unpaid", "Part paid": "partial", "Paid": "paid",
+              "Void": "void"}[self.status.get()]
+        rows = self.books.invoices(self.kind, st, search=self.search.get(), limit=LIST_LIMIT)
         today = date.today().isoformat()
         tags = [("red",) if r["status"] in ("open", "partial") and (r["due_date"] or "") < today
                 else ("muted",) if r["status"] == "void" else () for r in rows]
         self.docs.set_rows([[r["number"], r["date"], r["due_date"], r["contact"], r["reference"], r["total"],
-                             r["balance"] if r["status"] != "void" else 0, r["status"].title()] for r in rows],
+                             r["balance"] if r["status"] != "void" else 0,
+                             "Part paid" if r["status"] == "partial" else r["status"].title()] for r in rows],
                            ids=[r["id"] for r in rows], tags=tags)
-        ps = self.books.payments(self.pkind, search=self.psearch.get())
+
+    def refresh_pays(self):
+        ps = self.books.payments(self.pkind, search=self.psearch.get(), limit=LIST_LIMIT)
         self.pays.set_rows([[p["number"], p["date"], p["contact"], p["account"], p["method"], p["reference"],
                              p["amount"], p["status"].title()] for p in ps], ids=[p["id"] for p in ps],
                            tags=[("muted",) if p["status"] == "void" else () for p in ps])
+
+    def refresh_contacts(self):
         cs = self.books.contacts(self.ckind, search=self.csearch.get())
-        self.cons.set_rows([[c["name"], c["phone"], c["email"], c["tpin"], self.books.contact_balance(c["id"])]
+        bal = self.books.contact_balances(self.ckind)
+        self.cons.set_rows([[c["name"], c["phone"], c["email"], c["tpin"], bal.get(c["id"], 0.0)]
                             for c in cs], ids=[c["id"] for c in cs])
 
     def _doc(self):
@@ -514,7 +591,8 @@ class ItemsPage(Page):
         if self.books.has_module("inventory"):
             kinds.append(("stock", "Stock item (track quantity)"))
         v = FormDialog(self, "Item", [
-            ("name", "Name", "entry", None, it.get("name")), ("code", "Code", "entry", None, it.get("code")),
+            ("name", "Name", "entry", None, it.get("name")),
+            ("code", "Code", "readonly", None, it.get("code") or "Automatic (STK-/SRV- number)"),
             ("kind", "Type", "combo", kinds, it.get("kind")), ("unit", "Unit", "entry", None, it.get("unit", "each")),
             ("sale", "Sale price (excl. VAT)", "number", None, it.get("sale_price", 0)),
             ("cost", "Purchase cost", "number", None, it.get("cost_price", 0)),
@@ -595,10 +673,11 @@ class AccountingPage(Page):
     def refresh(self):
         s = self.asearch.get().lower()
         accs = [a for a in self.books.accounts(active_only=False) if s in (a["code"] + a["name"]).lower()]
-        self.accts.set_rows([[a["code"], a["name"], a["type"].title(), a["subtype"], self.books.balance(a["id"])]
+        bal = self.books.balances()
+        self.accts.set_rows([[a["code"], a["name"], a["type"].title(), a["subtype"], bal.get(a["id"], 0.0)]
                              for a in accs], ids=[a["id"] for a in accs],
                             tags=[("muted",) if not a["active"] else () for a in accs])
-        js = self.books.journals()
+        js = self.books.journals(limit=LIST_LIMIT)
         self.jr.set_rows([[j["id"], j["date"], j["ref"], j["source_type"], j["memo"], j["amount"], j["created_by"]]
                           for j in js], ids=[j["id"] for j in js])
         ds = self.books.departments(active_only=False)
@@ -688,7 +767,8 @@ REPORTS = [
     ("Profit and loss", "range"), ("Profit and loss by department", "range"), ("Balance sheet", "asof"),
     ("Trial balance", "asof"), ("General ledger / cash book", "range_account"), ("Debtors aging", "asof"),
     ("Creditors aging", "asof"), ("VAT summary", "range"), ("Customer / supplier statement", "range_contact"),
-    ("Inventory valuation", "none"), ("Sales by customer", "range"),
+    ("Inventory valuation", "none"), ("Sales by customer", "range"), ("Tourism levy summary", "range"),
+    ("Withholding tax summary", "range"),
 ]
 
 
@@ -704,7 +784,7 @@ class ReportsPage(Page):
         left = Card(body, "Reports")
         left.pack(side="left", fill="y")
         self.listbox = tk.Listbox(left, font=f(10), relief="flat", highlightthickness=0, activestyle="none",
-                                  selectbackground="#CFE8DD", selectforeground=C.NAVY, width=26, height=16,
+                                  selectbackground="#CFE8DD", selectforeground=C.NAVY, width=31, height=18,
                                   bd=0)
         for name, _ in REPORTS:
             self.listbox.insert("end", name)
@@ -879,6 +959,30 @@ class ReportsPage(Page):
                      r["cost"], r["value"]] for r in iv["rows"]]
             rows.append(("__total__", ["", "Total stock value", "", "", "", iv["total"]]))
             sub = f"As at {date.today().isoformat()}"
+        elif name == "Tourism levy summary":
+            t = b.tourism_summary(s, e)
+            headers, money_idx = ["Month", "Documents", "Sales subject to levy", "Levy charged", "Levy paid"], [2, 3, 4]
+            rows = [[date.fromisoformat(r["month"] + "-01").strftime("%B %Y"), r["docs"], r["base"], r["levy"],
+                     r["paid"]] for r in t["rows"]]
+            rows.append(("__total__", ["Total", sum(r["docs"] for r in t["rows"]), t["total_base"], t["total_levy"],
+                                       t["total_paid"]]))
+            if t["departments"]:
+                rows.append(("__section__", "By department"))
+                rows += [[d["department"], "", d["base"], d["levy"], ""] for d in t["departments"]]
+            rows.append(("__total__", [f"Levy owed to the Ministry of Tourism at {e}", "", "", t["owed"], ""]))
+            sub = f"{s} to {e} \u00b7 levy rate {t['rate']:g}%"
+        elif name == "Withholding tax summary":
+            w = b.wht_summary(s, e)
+            headers, money_idx = ["Name", "Payments", "Amount settled", "Withholding tax"], [2, 3]
+            rows = [("__section__", "Deducted from suppliers (pay to MRA)")]
+            rows += [[r["name"], r["count"], r["settled"], r["wht"]] for r in w["deducted"]]
+            rows.append(("__total__", ["Total deducted", "", "", w["total_deducted"]]))
+            rows.append(["Paid to MRA in this period", "", "", w["paid"]])
+            rows.append(("__total__", [f"Owed to MRA at {e} (payable annually)", "", "", w["owed"]]))
+            rows.append(("__section__", "Withheld by customers (claim with certificates)"))
+            rows += [[r["name"], r["count"], "", r["wht"]] for r in w["certificates"]]
+            rows.append(("__total__", ["Total certificates due", "", "", w["certificates_total"]]))
+            sub = f"{s} to {e} \u00b7 financial year {w['fy'][0]} to {w['fy'][1]}"
         elif name == "Sales by customer":
             data = b.q("SELECT c.name, COUNT(*) n, SUM(i.subtotal) net, SUM(i.vat) vat, SUM(i.total) tot "
                        "FROM invoices i JOIN contacts c ON c.id=i.contact_id WHERE i.kind='sale' AND i.status<>'void' "
@@ -942,6 +1046,9 @@ class ReportsPage(Page):
             info(self, f"Exported to {path}")
 
     def print_(self):
+        if self.output and self.current == "Customer / supplier statement" and self._sel_id():
+            printing.print_statement(self.books, self._sel_id(), self.start.get(), self.end.get())
+            return
         if self.output:
             name, sub, headers, rows, money_idx = self.output
             printing.print_report(self.books, name, sub, headers, rows, money_idx)
@@ -1033,7 +1140,7 @@ class SettingsPage(Page):
     def refresh(self):
         co = self.books.company()
         self.co_lbl.configure(text="\n".join(f"{k.replace('_', ' ').title()}:  {v}" for k, v in co.items()
-                                             if k != "lock_date"))
+                                             if k not in ("lock_date", "industry", "currency")))
         us = self.books.users()
         self.users.set_rows([[u["username"], u["full_name"], u["role"], "Yes" if u["active"] else "No", u["created_at"]]
                              for u in us], ids=[u["id"] for u in us])
@@ -1103,7 +1210,14 @@ class SettingsPage(Page):
             ("address", "Address", "text", None, co["address"]), ("phone", "Phone", "entry", None, co["phone"]),
             ("email", "Email", "entry", None, co["email"]), ("tpin", "TPIN", "entry", None, co["tpin"]),
             ("vat_rate", "VAT rate (%)", "number", None, co["vat_rate"]),
-            ("fy_start_month", "Financial year starts", "combo", months, int(co["fy_start_month"] or 1))],
+            ("tourism_levy_rate", "Tourism levy (%) on sales", "number", None, co["tourism_levy_rate"] or 0),
+            ("fy_start_month", "Financial year starts", "combo", months, int(co["fy_start_month"] or 1)),
+            ("bank_name", "Bank (printed on documents)", "entry", None, co["bank_name"]),
+            ("bank_branch", "Branch", "entry", None, co["bank_branch"]),
+            ("bank_account_name", "Account name", "entry", None, co["bank_account_name"]),
+            ("bank_account_no", "Account number", "entry", None, co["bank_account_no"]),
+            ("mobile_money", "Mobile money numbers", "entry", None, co["mobile_money"]),
+            ("payment_terms", "Payment terms on invoices", "entry", None, co["payment_terms"])],
             lambda v: self.books.update_company(**v)).show()
         if v:
             self.app.refresh()

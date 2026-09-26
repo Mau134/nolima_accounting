@@ -9,7 +9,7 @@ You need Windows 10/11, Python 3.10+ (tick "Add to PATH" when installing) and
    signing key the first time (in `%USERPROFILE%\NolimaLicenseVault`; **back this folder up**), runs the
    tests, packages the program and builds the installer:
 
-   `Output\NolimaAccounting-Setup-1.0.0.exe`
+   `Output\NolimaAccounting-Setup-1.1.0.exe`
 
 2. To issue keys, double-click `run_generator.bat` in the project folder.
 

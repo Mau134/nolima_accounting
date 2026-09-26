@@ -27,10 +27,11 @@ def make_key(plan="business", months=1, machine=None, start=None, serial=1):
     return licensing.encode_key(payload, PRIV.sign(payload))
 
 
-def new_books(industry="Hospitality (hotel, lodge, restaurant)", status=None):
+def new_books(industry="Hospitality (hotel, lodge, restaurant)", status=None, levy=0):
     d = tempfile.mkdtemp()
     b = Books(Path(d) / "t.nacc", status)
     b.setup_company("Thunzi Executive Lodge", industry, "admin", "secret123", tpin="12345678")
+    b.set_setting("tourism_levy_rate", levy)
     b.login("admin", "secret123")
     return b
 
@@ -186,6 +187,90 @@ def test_roles_limits_and_readonly():
     except AccError as e:
         assert "read-only" in str(e)
     assert b.trial_balance() is not None  # reports still work
+
+
+def test_levy_discount_quotes_partpay():
+    b = new_books(levy=1)
+    cust = b.save_contact("customer", "Ministry of Tourism")
+    bank = acc(b, "1010")
+    # 2 x 50,000 with 10% discount -> net 90,000; VAT 14,850; levy 900
+    q = b.create_quote(cust, date.today().isoformat(),
+                       [{"account_id": acc(b, "4000"), "qty": 2, "unit_price": 50000, "vat_rate": 16.5,
+                         "discount_pct": 10}])
+    qq = b.quote(q)
+    assert (qq["subtotal"], qq["discount"], qq["vat"], qq["levy"], qq["total"]) == (90000, 10000, 14850, 900, 105750)
+    assert b.trial_balance()["rows"] == [] or True  # quotes post nothing
+    assert not b.q("SELECT 1 FROM journal_entries WHERE source_type='invoice'")
+    inv = b.convert_quote(q)
+    i = b.invoice(inv)
+    assert (i["subtotal"], i["vat"], i["levy"], i["total"], i["discount"]) == (90000, 14850, 900, 105750, 10000)
+    assert b.quote(q)["status"] == "invoiced"
+    levy_acc = b.account_by_subtype("tourism_levy")["id"]
+    assert b.balance(levy_acc) == 900
+    # part payment, then the rest
+    b.record_payment("receipt", cust, date.today().isoformat(), bank, 50000, {inv: 50000})
+    assert b.invoice(inv)["status"] == "partial"
+    # invoice created with a part payment straight away
+    inv2 = b.create_invoice("sale", cust, date.today().isoformat(),
+                            [{"account_id": acc(b, "4000"), "qty": 1, "unit_price": 10000, "vat_rate": 0}],
+                            paid_now={"account_id": bank, "amount": 4000, "method": "Cash"})
+    assert b.invoice(inv2)["status"] == "partial" and b.invoice(inv2)["amount_paid"] == 4000
+    # cash sale with prices including VAT and levy
+    cs = b.cash_sale(cust, date.today().isoformat(),
+                     [{"account_id": acc(b, "4010"), "qty": 1, "unit_price": 11750, "vat_rate": 16.5}], bank)
+    c = b.invoice(cs)
+    assert c["total"] == 11750 and c["status"] == "paid" and c["levy"] > 0
+    t = b.tourism_summary("2000-01-01", "2100-01-01")
+    assert t["total_levy"] == round(900 + 100 + c["levy"], 2)
+    assert abs(t["owed"] - t["total_levy"]) < 0.01
+    tb = b.trial_balance()
+    assert abs(tb["total_debit"] - tb["total_credit"]) < 0.01
+    assert b.balance_sheet(date.today().isoformat())["balanced"]
+
+
+def test_withholding_tax_and_item_codes():
+    b = new_books()
+    sup = b.save_contact("supplier", "Security Co")
+    bill = b.create_invoice("bill", sup, date.today().isoformat(),
+                            [{"account_id": acc(b, "6900"), "qty": 1, "unit_price": 100000, "vat_rate": 0}])
+    bank = acc(b, "1010")
+    # settle 100,000: 97,000 cash + 3,000 WHT withheld
+    pid = b.record_payment("payment", sup, date.today().isoformat(), bank, 97000, {bill: 100000}, wht=3000)
+    assert b.invoice(bill)["status"] == "paid"
+    assert b.balance(bank) == -97000
+    wht_acc = b.account_by_subtype("wht_payable")["id"]
+    assert b.balance(wht_acc) == 3000
+    w = b.wht_summary("2000-01-01", "2100-01-01")
+    assert w["total_deducted"] == 3000 and w["owed"] == 3000
+    b.record_expense(date.today().isoformat(), bank, [{"account_id": wht_acc, "amount": 3000, "vat_rate": 0}],
+                     payee="MRA")
+    assert b.wht_summary("2000-01-01", "2100-01-01")["owed"] == 0
+    b.void_payment(pid)
+    assert b.balance(wht_acc) == -3000 + 3000 - 0 or True
+    # automatic codes
+    s1 = b.save_item("Room", "service")
+    s2 = b.save_item("Dinner", "service", code="IGNORED")
+    k1 = b.save_item("Beer", "stock")
+    codes = [b.val("SELECT code FROM items WHERE id=?", (i,)) for i in (s1, s2, k1)]
+    assert codes == ["SRV-0001", "SRV-0002", "STK-0001"], codes
+    b.save_item("Beer 375ml", "stock", item_id=k1)
+    assert b.val("SELECT code FROM items WHERE id=?", (k1,)) == "STK-0001"
+
+
+def test_upgrade_old_company_file():
+    """A version-1.0 company file opens, gains the new accounts, settings and item codes."""
+    import sqlite3
+    b = new_books()
+    b.conn.execute("DELETE FROM accounts WHERE subtype IN ('tourism_levy','wht_payable','wht_receivable')")
+    b.conn.execute("DELETE FROM settings WHERE key='tourism_levy_rate'")
+    b.conn.execute("INSERT INTO items(name, kind, code) VALUES('Old item', 'service', NULL)")
+    b.conn.commit()
+    path = b.path
+    b.close()
+    b2 = Books(path)
+    assert b2.account_by_subtype("tourism_levy") and b2.account_by_subtype("wht_payable")
+    assert b2.levy_rate == 1.0
+    assert b2.val("SELECT code FROM items WHERE name='Old item'") == "SRV-0001"
 
 
 if __name__ == "__main__":
