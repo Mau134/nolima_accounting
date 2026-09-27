@@ -57,8 +57,11 @@ class Books:
     NEW_ACCOUNTS = [("1160", "Withholding Tax Receivable (certificates)", "asset", "wht_receivable"),
                     ("2120", "Tourism Levy Payable", "liability", "tourism_levy"),
                     ("2130", "Withholding Tax Payable (annual)", "liability", "wht_payable")]
+    BANK_FIELDS = ["name", "branch", "account_name", "account_no"]
     DEFAULT_SETTINGS = {"tourism_levy_rate": "1", "quote_prefix": "QUO-", "bank_name": "", "bank_branch": "",
                         "bank_account_name": "", "bank_account_no": "", "mobile_money": "",
+                        **{f"bank{n}_{f}": "" for n in (2, 3) for f in ["name", "branch", "account_name",
+                                                                         "account_no"]},
                         "payment_terms": "Payment is due by the date shown on this invoice."}
 
     def _upgrade_company(self):
@@ -166,6 +169,25 @@ class Books:
                 "fy_start_month", "currency", "lock_date", "tourism_levy_rate", "bank_name", "bank_branch",
                 "bank_account_name", "bank_account_no", "mobile_money", "payment_terms"]
         return {k: self.setting(k, "") for k in keys}
+
+    def banks(self) -> list:
+        """Up to three banks for documents; bank 1 uses the original setting names."""
+        out = []
+        for n in (1, 2, 3):
+            pre = "bank_" if n == 1 else f"bank{n}_"
+            b = {f: self.setting(pre + f, "") or "" for f in self.BANK_FIELDS}
+            out.append(b)
+        return out
+
+    def save_banks(self, banks, mobile_money):
+        self.require("setup")
+        for n, b in enumerate(banks[:3], 1):
+            pre = "bank_" if n == 1 else f"bank{n}_"
+            for f in self.BANK_FIELDS:
+                self.set_setting(pre + f, (b.get(f) or "").strip())
+        self.set_setting("mobile_money", mobile_money.strip())
+        self.audit("update", "company", None, "bank details")
+        self.conn.commit()
 
     @property
     def levy_rate(self) -> float:
@@ -591,8 +613,10 @@ class Books:
 
     # ------------------------------------------------------------ invoices & bills
     def _calc_lines(self, lines, prices_inc_vat=False, levy_rate=0.0):
-        """Price each line: discount first, then VAT and tourism levy on the discounted net amount.
-        With prices_inc_vat the entered price already contains VAT (and levy, when charged)."""
+        """Price a document. Each line: quantity x price less its discount = line amount.
+        VAT and tourism levy are then calculated once on the subtotal (per VAT rate) and added on top,
+        so the printed VAT is exactly VAT% of the subtotal and the levy exactly levy% of the subtotal.
+        (prices_inc_vat is kept for old callers and ignored: prices are always before VAT and levy.)"""
         out = []
         for l in lines:
             qty = float(l.get("qty") or 0)
@@ -605,26 +629,32 @@ class Books:
                 raise AccError("Discounts must be between 0% and 100%.")
             if not l.get("account_id") and not l.get("item_id"):
                 raise AccError("Each line needs an item or an account.")
-            gross = qty * price
-            after = gross * (1 - disc / 100)
-            if prices_inc_vat:
-                factor = 1 + rate / 100 + levy_rate / 100
-                net = r2(after / factor)
-                full_net = r2(gross / factor)
-                levy = r2(net * levy_rate / 100)
-                vat = r2(after - net - levy) if rate else 0.0
-                if not rate:
-                    levy = r2(after - net)
-            else:
-                net = r2(after)
-                full_net = r2(gross)
-                vat = r2(net * rate / 100)
-                levy = r2(net * levy_rate / 100)
-            out.append(dict(l, qty=qty, unit_price=price, vat_rate=rate, discount_pct=disc, net=net, vat=vat,
-                            levy=levy, discount_amt=r2(full_net - net)))
+            gross = r2(qty * price)
+            net = r2(gross * (1 - disc / 100))
+            out.append(dict(l, qty=qty, unit_price=price, vat_rate=rate, discount_pct=disc, net=net,
+                            vat=0.0, levy=0.0, discount_amt=r2(gross - net)))
         if not out:
             raise AccError("Add at least one line.")
+        # VAT on the subtotal of each VAT rate, spread over the lines so reports by line still add up
+        for rate in {l["vat_rate"] for l in out if l["vat_rate"]}:
+            group = [l for l in out if l["vat_rate"] == rate]
+            self._spread(group, r2(sum(l["net"] for l in group) * rate / 100), "vat")
+        if levy_rate:
+            self._spread(out, r2(r2(sum(l["net"] for l in out)) * levy_rate / 100), "levy")
         return out
+
+    @staticmethod
+    def _spread(lines, total, key):
+        """Share a document-level amount across lines in proportion to their amounts (rounding on the largest)."""
+        base = sum(l["net"] for l in lines)
+        if not base:
+            return
+        for l in lines:
+            l[key] = r2(total * l["net"] / base)
+        diff = r2(total - sum(l[key] for l in lines))
+        if diff:
+            big = max(lines, key=lambda x: abs(x["net"]))
+            big[key] = r2(big[key] + diff)
 
     @staticmethod
     def totals(lines):
@@ -635,7 +665,7 @@ class Books:
         return {"subtotal": sub, "discount": disc, "vat": vat, "levy": levy, "total": r2(sub + vat + levy)}
 
     def create_invoice(self, kind, contact_id, d, lines, due_date=None, memo="", reference="",
-                       prices_inc_vat=False, number=None, apply_levy=True, paid_now=None):
+                       prices_inc_vat=False, number=None, apply_levy=True, paid_now=None, wht=0.0):
         """kind 'sale' (customer invoice) or 'bill' (supplier bill).
         lines: {item_id?, account_id?, description, qty, unit_price, vat_rate, department_id?}"""
         self.guard_write("post")
@@ -728,12 +758,44 @@ class Books:
         self.conn.execute("UPDATE invoices SET entry_id=? WHERE id=?", (eid, inv_id))
         self.audit("create", "invoice" if kind == "sale" else "bill", inv_id, f"{number} {total:,.2f}")
         self.conn.commit()
+        if r2(wht) > 0:
+            if kind != "sale":
+                raise AccError("Withholding tax is entered on customer invoices only.")
+            self.add_invoice_wht(inv_id, wht, d)
         if paid_now and r2(paid_now.get("amount")) > 0:
-            amt = min(r2(paid_now["amount"]), total)
+            amt = min(r2(paid_now["amount"]), r2(total - r2(wht)))
             self.record_payment("receipt" if kind == "sale" else "payment", contact_id, d, paid_now["account_id"],
                                 amt, {inv_id: amt}, paid_now.get("method", ""), paid_now.get("reference", ""),
                                 "Part payment" if amt < total else "")
         return inv_id
+
+    def add_invoice_wht(self, inv_id, amount, d=None):
+        """Withholding tax the customer deducts from an invoice, typed in manually.
+        It settles that part of the invoice and is kept in the Withholding Tax account."""
+        self.guard_write("post")
+        inv = self.one("SELECT * FROM invoices WHERE id=?", (inv_id,))
+        if not inv or inv["kind"] != "sale":
+            raise AccError("Withholding tax is entered on customer invoices only.")
+        if inv["status"] == "void":
+            raise AccError("This invoice is void.")
+        amount = r2(amount)
+        if amount <= 0:
+            raise AccError("Enter the withholding tax amount.")
+        if amount - r2(inv["total"] - inv["amount_paid"]) > EPS:
+            raise AccError(f"Withholding tax cannot be more than the balance due "
+                           f"({inv['total'] - inv['amount_paid']:,.2f}).")
+        d = d or today()
+        cname = self.val("SELECT name FROM contacts WHERE id=?", (inv["contact_id"],))
+        self.post_entry(d, f"Withholding tax on {inv['number']} - {cname}",
+                        [{"account_id": self.account_by_subtype("wht_receivable")["id"], "debit": amount,
+                          "description": f"WHT {inv['number']}"},
+                         {"account_id": self.account_by_subtype("receivable")["id"], "credit": amount,
+                          "description": f"WHT {inv['number']}"}], "wht", inv_id, ref=inv["number"], commit=False)
+        self.conn.execute("UPDATE invoices SET wht=COALESCE(wht,0)+?, amount_paid=amount_paid+? WHERE id=?",
+                          (amount, amount, inv_id))
+        self._refresh_status(inv_id)
+        self.audit("wht", "invoice", inv_id, f"{inv['number']} {amount:,.2f}")
+        self.conn.commit()
 
     def invoice(self, inv_id):
         return self.one("SELECT i.*, c.name AS contact, c.address, c.phone, c.email, c.tpin AS contact_tpin "
@@ -771,10 +833,12 @@ class Books:
         inv = self.one("SELECT * FROM invoices WHERE id=?", (inv_id,))
         if not inv or inv["status"] == "void":
             raise AccError("Document not found or already void.")
-        if inv["amount_paid"] > EPS:
+        if inv["amount_paid"] - (inv["wht"] or 0) > EPS:
             raise AccError("Remove the payments allocated to this document before voiding it.")
         d = max(today(), inv["date"])
         self.reverse_entry(inv["entry_id"], d, f"Void {inv['number']}: {reason}", commit=False)
+        for e in self.q("SELECT id FROM journal_entries WHERE source_type='wht' AND source_id=?", (inv_id,)):
+            self.reverse_entry(e["id"], d, f"Void WHT on {inv['number']}", commit=False)
         for l in self.invoice_lines(inv_id):
             if l["item_id"]:
                 it = self.one("SELECT * FROM items WHERE id=?", (l["item_id"],))
@@ -978,7 +1042,7 @@ class Books:
             sql += f" LIMIT {int(limit)}"
         return self.q(sql, args)
 
-    def cash_sale(self, contact_id, d, lines, account_id, method="Cash", reference="", memo="", prices_inc_vat=True,
+    def cash_sale(self, contact_id, d, lines, account_id, method="Cash", reference="", memo="", prices_inc_vat=False,
                   apply_levy=True):
         inv_id = self.create_invoice("sale", contact_id, d, lines, due_date=d, memo=memo, reference=reference,
                                      prices_inc_vat=prices_inc_vat, apply_levy=apply_levy)
@@ -1296,9 +1360,11 @@ class Books:
                                     "AND p.status<>'void' AND p.wht>0 AND p.date BETWEEN ? AND ? GROUP BY c.id "
                                     "ORDER BY wht DESC", (start, end))]
         certificates = [{"name": r["name"], "count": r["n"], "wht": r2(r["wht"])}
-                        for r in self.q("SELECT c.name, COUNT(*) n, SUM(p.wht) wht FROM payments p JOIN contacts c "
-                                        "ON c.id=p.contact_id WHERE p.kind='receipt' AND p.status<>'void' AND p.wht>0 "
-                                        "AND p.date BETWEEN ? AND ? GROUP BY c.id ORDER BY wht DESC", (start, end))]
+                        for r in self.q("SELECT c.name, COUNT(DISTINCT i.id) n, SUM(l.credit) wht FROM journal_entries e "
+                                        "JOIN invoices i ON i.id=e.source_id JOIN contacts c ON c.id=i.contact_id "
+                                        "JOIN journal_lines l ON l.entry_id=e.id AND l.credit>0 "
+                                        "WHERE e.source_type='wht' AND i.status<>'void' AND e.date BETWEEN ? AND ? "
+                                        "GROUP BY c.id ORDER BY wht DESC", (start, end))]
         paid = r2(self.val("SELECT SUM(l.debit-l.credit) FROM journal_lines l JOIN journal_entries e ON "
                            "e.id=l.entry_id WHERE l.account_id=? AND e.date BETWEEN ? AND ? AND e.source_type NOT IN "
                            "('payment','reversal')", (pay_acc, start, end), 0))
@@ -1313,6 +1379,11 @@ class Books:
         def movements(cond, args):
             inv = self.q(f"SELECT date, number AS ref, 'Invoice' AS type, total AS amount FROM invoices "
                          f"WHERE contact_id=? AND kind=? AND status<>'void' AND {cond}", [contact_id, inv_kind] + args)
+            inv = list(inv) + list(self.q(
+                f"SELECT e.date, i.number AS ref, 'Withholding tax' AS type, -(l.credit) AS amount "
+                f"FROM journal_entries e JOIN invoices i ON i.id=e.source_id JOIN journal_lines l ON l.entry_id=e.id "
+                f"AND l.credit>0 WHERE e.source_type='wht' AND i.contact_id=? AND i.status<>'void' AND "
+                f"{cond.replace('date', 'e.date')}", [contact_id] + args))
             pay = self.q(f"SELECT date, number AS ref, 'Payment' AS type, -(amount + COALESCE(wht,0)) AS amount "
                          f"FROM payments "
                          f"WHERE contact_id=? AND kind=? AND status<>'void' AND {cond}", [contact_id, pay_kind] + args)

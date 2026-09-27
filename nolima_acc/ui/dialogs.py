@@ -72,10 +72,10 @@ class InvoiceDialog(Dialog):
         opts.pack(fill="x")
         self.levy_rate = books.levy_rate if sale_like else 0.0
         self.levy_on = tk.BooleanVar(value=self.levy_rate > 0)
-        self.inc = tk.BooleanVar(value=cash)
-        inc_text = "Prices include VAT" + (" and levy" if self.levy_rate else "")
-        ttk.Checkbutton(opts, text=inc_text, variable=self.inc, style="Card.TCheckbutton",
-                        command=self.update_totals).pack(side="left")
+        self.inc = tk.BooleanVar(value=False)  # prices are always before VAT and levy
+        ttk.Label(opts, text="Prices are before VAT" + (" and levy" if self.levy_rate else "") +
+                  "; VAT" + (" and levy are" if self.levy_rate else " is") + " calculated on the subtotal.",
+                  style="CardMuted.TLabel").pack(side="left")
         if self.levy_rate:
             ttk.Checkbutton(opts, text=f"Charge tourism levy ({self.levy_rate:g}%)", variable=self.levy_on,
                             style="Card.TCheckbutton", command=self.update_totals).pack(side="left", padx=18)
@@ -91,6 +91,16 @@ class InvoiceDialog(Dialog):
         m.pack(fill="x", pady=(4, 0))
         ttk.Label(m, text="Notes", style="CardMuted.TLabel").pack(side="left")
         ttk.Entry(m, textvariable=self.memo).pack(side="left", fill="x", expand=True, padx=8)
+        # withholding tax: typed in by hand, customer invoices only
+        self.wht = tk.StringVar()
+        if kind == "sale" and not cash:
+            wf = ttk.Frame(self.body, style="Card.TFrame")
+            wf.pack(fill="x", pady=(8, 0))
+            ttk.Label(wf, text="Withholding tax deducted by customer (MWK)", style="CardMuted.TLabel").pack(side="left")
+            e = ttk.Entry(wf, textvariable=self.wht, width=14)
+            e.pack(side="left", padx=8)
+            e.bind("<KeyRelease>", lambda ev: self.update_totals())
+            ttk.Label(wf, text="Optional", style="CardMuted.TLabel").pack(side="left", padx=4)
         # part payment at the time of invoicing
         self.paid_now = tk.StringVar()
         if kind in ("sale", "bill") and not cash:
@@ -109,8 +119,8 @@ class InvoiceDialog(Dialog):
             ttk.Label(self.body, text="Leave blank if nothing is paid yet. Any amount less than the total is a part "
                                       "payment; the rest stays as a balance due.", style="CardMuted.TLabel"
                       ).pack(anchor="w", pady=(2, 0))
-        self.totals = ttk.Label(self.buttons, text="", style="Card.TLabel", font=f(11, "bold"))
-        self.totals.pack(side="left")
+        self.totals = ttk.Label(self.body, text="", style="Card.TLabel", font=f(11, "bold"))
+        self.totals.pack(anchor="e", pady=(12, 0))
         ttk.Button(self.buttons, text="Save and print", command=lambda: self.save(True)).pack(side="right")
         ttk.Button(self.buttons, text="Save", style="Primary.TButton", command=self.save).pack(side="right", padx=8)
         ttk.Button(self.buttons, text="Cancel", command=self.destroy).pack(side="right")
@@ -149,6 +159,12 @@ class InvoiceDialog(Dialog):
         if t["levy"]:
             parts.append(f"Levy {money(t['levy'])}")
         parts.append(f"Total MWK {money(t['total'])}")
+        try:
+            w = num(self.wht.get()) if self.wht.get().strip() else 0
+        except ValueError:
+            w = 0
+        if w:
+            parts.append(f"Less WHT {money(w)}   Customer pays {money(t['total'] - w)}")
         self.totals.configure(text="    ".join(parts))
 
     def save(self, print_after=False):
@@ -159,12 +175,12 @@ class InvoiceDialog(Dialog):
             levy = bool(self.levy_on.get())
             if self.kind == "quote":
                 doc_id = self.books.create_quote(cid, self.date.get(), self.lines.lines, self.due.get(),
-                                                 self.memo.get(), self.ref.get(), self.inc.get(), levy)
+                                                 self.memo.get(), self.ref.get(), False, levy)
             elif self.cash:
                 bank = next((b[0] for b in self.banks if b[1] == self.bank.get()), None)
                 doc_id = self.books.cash_sale(cid, self.date.get(), self.lines.lines, bank, method=self.bank.get(),
                                               reference=self.ref.get(), memo=self.memo.get(),
-                                              prices_inc_vat=self.inc.get(), apply_levy=levy)
+                                              prices_inc_vat=False, apply_levy=levy)
             else:
                 paid = None
                 if self.paid_now.get().strip():
@@ -174,10 +190,13 @@ class InvoiceDialog(Dialog):
                     bank = next((b[0] for b in self.banks if b[1] == self.pp_bank.get()), None)
                     paid = {"amount": amt, "account_id": bank, "method": self.pp_method.get(),
                             "reference": self.ref.get()}
+                w = num(self.wht.get()) if self.wht.get().strip() else 0
+                if w < 0:
+                    raise AccError("Withholding tax cannot be negative.")
                 doc_id = self.books.create_invoice(self.kind, cid, self.date.get(), self.lines.lines,
                                                    due_date=self.due.get(), memo=self.memo.get(),
-                                                   reference=self.ref.get(), prices_inc_vat=self.inc.get(),
-                                                   apply_levy=levy, paid_now=paid)
+                                                   reference=self.ref.get(), prices_inc_vat=False,
+                                                   apply_levy=levy, paid_now=paid, wht=w)
         except (AccError, ValueError) as exc:
             error(self, exc)
             return
@@ -214,12 +233,9 @@ class PaymentDialog(Dialog):
         hdr2 = _Header(self.body)
         hdr2.pack(fill="x")
         self.amount = tk.StringVar()
-        e = hdr2.add("Amount settled (MWK)", ttk.Entry(hdr2, textvariable=self.amount, width=16))
+        e = hdr2.add("Amount (MWK)", ttk.Entry(hdr2, textvariable=self.amount, width=16))
         e.bind("<KeyRelease>", lambda ev: self.preview())
-        self.wht_rate = tk.StringVar(value="0%")
-        cb = hdr2.add("Withholding tax", ttk.Combobox(hdr2, textvariable=self.wht_rate, width=7, state="readonly",
-                                                      values=["0%", "3%", "10%", "20%"]))
-        cb.bind("<<ComboboxSelected>>", lambda ev: self.preview())
+
         self.method = tk.StringVar(value="Cash")
         hdr2.add("Method", ttk.Combobox(hdr2, textvariable=self.method, width=16,
                                         values=["Cash", "Bank transfer", "Cheque", "Airtel Money", "TNM Mpamba",
@@ -278,12 +294,7 @@ class PaymentDialog(Dialog):
         return out
 
     def wht(self):
-        try:
-            settled = num(self.amount.get())
-        except ValueError:
-            return 0.0
-        rate = float(self.wht_rate.get().rstrip("%") or 0)
-        return round(settled * rate / 100, 2)
+        return 0.0  # withholding tax is entered on customer invoices, not on payments
 
     def preview(self):
         try:
@@ -293,8 +304,7 @@ class PaymentDialog(Dialog):
         w = self.wht()
         word = "received" if self.kind == "receipt" else "paid"
         who = "withheld by the customer" if self.kind == "receipt" else "deducted and owed to MRA"
-        self.cash_lbl.configure(text=f"Cash {word}: MWK {money(settled - w)}" +
-                                (f"    Withholding tax {who}: MWK {money(w)}" if w else ""))
+        self.cash_lbl.configure(text=f"Amount {word}: MWK {money(settled)}")
         alloc = self.allocations()
         sel = self.table.selected()
         self.table.set_rows([[d["number"], d["date"], d["due_date"], money(d["total"]), money(d["balance"]),

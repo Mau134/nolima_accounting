@@ -292,8 +292,11 @@ class DocumentsPage(Page):
                               width=10, state="readonly")
             cb.pack(side="left")
             cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_docs())
-            for text, cmd in [("Print", self.print_doc), ("Record payment", self.pay_doc), ("View entry", self.view_entry),
-                              ("Void", self.void_doc)]:
+            actions = [("Print", self.print_doc), ("Record payment", self.pay_doc), ("View entry", self.view_entry),
+                       ("Void", self.void_doc)]
+            if sale:
+                actions.insert(2, ("Withholding tax", self.add_wht))
+            for text, cmd in actions:
                 ttk.Button(bar, text=text, command=self._safe(cmd)).pack(side="right", padx=3)
         self.search, _ = search_bar(t1, self.refresh_docs, extra)
         self.docs = Table(t1, [("num", "Number", 110, "w"), ("date", "Date", 95, "w"), ("due", "Due", 95, "w"),
@@ -424,6 +427,19 @@ class DocumentsPage(Page):
     def pay_doc(self):
         inv = self.books.invoice(self._doc())
         self.app.open_dialog(PaymentDialog, self.pkind, inv["contact_id"], inv["id"])
+
+    def add_wht(self):
+        inv = self.books.invoice(self._doc())
+        bal = inv["total"] - inv["amount_paid"]
+        v = FormDialog(self, f"Withholding tax on {inv['number']}", [
+            ("amount", f"Withholding tax deducted by {inv['contact']} (MWK)", "number"),
+            ("date", "Date", "date")],
+            lambda v: self.books.add_invoice_wht(inv["id"], v["amount"], v["date"]),
+            ok_text="Record withholding tax").show()
+        if v:
+            self.app.refresh()
+            info(self, f"Withholding tax recorded. Balance still due on {inv['number']}: "
+                       f"MWK {money(bal - v['amount'])}. Keep the customer's WHT certificate.")
 
     def view_entry(self):
         inv = self.books.invoice(self._doc())
@@ -1076,6 +1092,31 @@ class SettingsPage(Page):
         self.co_lbl = ttk.Label(t, text="", style="Card.TLabel", justify="left")
         self.co_lbl.pack(anchor="w")
         ttk.Button(t, text="Edit company details", command=self._safe(self.edit_company)).pack(anchor="w", pady=10)
+        # bank details
+        t = Card(nb, "Bank details printed on invoices, quotations, receipts and statements")
+        nb.add(t, text="Bank details")
+        grid = ttk.Frame(t, style="Card.TFrame")
+        grid.pack(anchor="w")
+        self.bank_vars = []
+        labels = [("name", "Bank"), ("branch", "Branch"), ("account_name", "Account name"),
+                  ("account_no", "Account number")]
+        for n in range(3):
+            col = ttk.Frame(grid, style="Card.TFrame")
+            col.grid(row=0, column=n, sticky="n", padx=(0, 28))
+            ttk.Label(col, text=f"BANK {n + 1}" + ("" if n < 2 else " (optional)"), style="Card.TLabel",
+                      font=f(10, "bold"), foreground=C.EMERALD).pack(anchor="w", pady=(0, 6))
+            vs = {}
+            for key, lab in labels:
+                ttk.Label(col, text=lab, style="CardMuted.TLabel").pack(anchor="w")
+                vs[key] = tk.StringVar()
+                ttk.Entry(col, textvariable=vs[key], width=28).pack(anchor="w", pady=(2, 8))
+            self.bank_vars.append(vs)
+        ttk.Label(t, text="Mobile money (e.g. Airtel Money 0999 000 000 \u00b7 TNM Mpamba 0888 000 000)",
+                  style="CardMuted.TLabel").pack(anchor="w", pady=(6, 0))
+        self.mm_var = tk.StringVar()
+        ttk.Entry(t, textvariable=self.mm_var, width=90).pack(anchor="w", pady=(2, 12))
+        ttk.Button(t, text="Save bank details", style="Primary.TButton",
+                   command=self._safe(self.save_banks)).pack(anchor="w")
         # users
         t = Card(nb)
         nb.add(t, text="Users")
@@ -1140,7 +1181,12 @@ class SettingsPage(Page):
     def refresh(self):
         co = self.books.company()
         self.co_lbl.configure(text="\n".join(f"{k.replace('_', ' ').title()}:  {v}" for k, v in co.items()
-                                             if k not in ("lock_date", "industry", "currency")))
+                                             if k not in ("lock_date", "industry", "currency") and
+                                             not k.startswith("bank") and k != "mobile_money"))
+        for vs, b in zip(self.bank_vars, self.books.banks()):
+            for k, var in vs.items():
+                var.set(b.get(k, ""))
+        self.mm_var.set(self.books.setting("mobile_money", "") or "")
         us = self.books.users()
         self.users.set_rows([[u["username"], u["full_name"], u["role"], "Yes" if u["active"] else "No", u["created_at"]]
                              for u in us], ids=[u["id"] for u in us])
@@ -1197,6 +1243,15 @@ class SettingsPage(Page):
                                       f"{C.VENDOR_EMAIL} with your Machine ID.", style="CardMuted.TLabel",
                   justify="left").pack(anchor="w")
 
+    def save_banks(self):
+        banks = [{k: var.get() for k, var in vs.items()} for vs in self.bank_vars]
+        filled = [b for b in banks if b["name"].strip() and b["account_no"].strip()]
+        if len(filled) < 2 and not confirm(self, "Fewer than two banks have a name and account number. "
+                                                 "Save anyway?"):
+            return
+        self.books.save_banks(banks, self.mm_var.get())
+        info(self, "Bank details saved. They now print on all customer documents.")
+
     def copy_mid(self):
         self.clipboard_clear()
         self.clipboard_append(licensing.this_machine_id())
@@ -1212,11 +1267,6 @@ class SettingsPage(Page):
             ("vat_rate", "VAT rate (%)", "number", None, co["vat_rate"]),
             ("tourism_levy_rate", "Tourism levy (%) on sales", "number", None, co["tourism_levy_rate"] or 0),
             ("fy_start_month", "Financial year starts", "combo", months, int(co["fy_start_month"] or 1)),
-            ("bank_name", "Bank (printed on documents)", "entry", None, co["bank_name"]),
-            ("bank_branch", "Branch", "entry", None, co["bank_branch"]),
-            ("bank_account_name", "Account name", "entry", None, co["bank_account_name"]),
-            ("bank_account_no", "Account number", "entry", None, co["bank_account_no"]),
-            ("mobile_money", "Mobile money numbers", "entry", None, co["mobile_money"]),
             ("payment_terms", "Payment terms on invoices", "entry", None, co["payment_terms"])],
             lambda v: self.books.update_company(**v)).show()
         if v:

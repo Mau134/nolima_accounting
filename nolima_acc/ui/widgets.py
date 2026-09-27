@@ -379,7 +379,7 @@ class LinesEditor(ttk.Frame):
                     ("amt", "Amount", 110, "e")]
         if self.show_depts:
             cols.append(("dept", "Department", 110, "w"))
-        self.table = Table(self, cols, height=6)
+        self.table = Table(self, cols, height=5)
         self.table.pack(fill="both", expand=True)
         bar = ttk.Frame(self, style="Card.TFrame")
         bar.pack(fill="x", pady=(6, 0))

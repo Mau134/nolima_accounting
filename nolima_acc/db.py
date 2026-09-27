@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS reconciliations (
 COLUMNS = {
     "invoice_lines": [("discount_pct", "REAL DEFAULT 0"), ("discount_amt", "REAL DEFAULT 0"),
                       ("levy", "REAL DEFAULT 0")],
-    "invoices": [("discount", "REAL DEFAULT 0"), ("levy", "REAL DEFAULT 0")],
+    "invoices": [("discount", "REAL DEFAULT 0"), ("levy", "REAL DEFAULT 0"), ("wht", "REAL DEFAULT 0")],
     "payments": [("wht", "REAL DEFAULT 0")],
 }
 

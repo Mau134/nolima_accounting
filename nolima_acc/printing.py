@@ -48,21 +48,28 @@ def _header(company, title, subtitle=""):
             f"<div><h2>{_e(title)}</h2><div class='muted' style='text-align:right'>{subtitle}</div></div></div>")
 
 
-def _bank_block(co):
-    """Bank and mobile money details printed on every document sent to customers."""
-    rows = [("Bank", co.get("bank_name")), ("Branch", co.get("bank_branch")),
-            ("Account name", co.get("bank_account_name")), ("Account number", co.get("bank_account_no")),
-            ("Mobile money", co.get("mobile_money"))]
-    rows = [(k, v) for k, v in rows if v]
-    if not rows:
+def _bank_block(books):
+    """All bank accounts (up to three) and mobile money, printed on every customer document."""
+    banks = [b for b in books.banks() if b["name"].strip() or b["account_no"].strip()]
+    mm = (books.setting("mobile_money", "") or "").strip()
+    if not banks and not mm:
         return ""
-    cells = ""
-    for i in range(0, len(rows), 2):
-        pair = rows[i:i + 2]
-        cells += "<tr>" + "".join(f"<td class='bk'>{_e(k)}</td><td class='bv'>{_e(v)}</td>" for k, v in pair) + \
-            ("<td></td><td></td>" if len(pair) == 1 else "") + "</tr>"
-    return (f"<div class='bank'><div class='bt'>PAYMENT DETAILS</div>"
-            f"<table class='bktab'>{cells}</table></div>")
+    cols = ""
+    for b in banks:
+        cols += ("<td class='bcol'>"
+                 f"<div class='bname'>{_e(b['name'])}</div>"
+                 + (f"<div><span class='muted'>Branch:</span> {_e(b['branch'])}</div>" if b["branch"] else "")
+                 + (f"<div><span class='muted'>Account name:</span> {_e(b['account_name'])}</div>"
+                    if b["account_name"] else "")
+                 + (f"<div><span class='muted'>Account no.:</span> <b>{_e(b['account_no'])}</b></div>"
+                    if b["account_no"] else "")
+                 + "</td>")
+    out = "<div class='bank'><div class='bt'>PAYMENT DETAILS</div>"
+    if cols:
+        out += f"<table class='bktab'><tr>{cols}</tr></table>"
+    if mm:
+        out += f"<div class='mm'><span class='muted'>Mobile money:</span> <b>{_e(mm)}</b></div>"
+    return out + "</div>"
 
 
 def _lines_table(co, lines, doc):
@@ -92,7 +99,7 @@ def _lines_table(co, lines, doc):
 EXTRA_CSS = f"""
 .bank{{margin-top:22px;border:1px solid {C.LINE};border-radius:10px;padding:12px 14px;background:#F6FAF8}}
 .bt{{font-size:11px;font-weight:bold;color:{C.EMERALD};letter-spacing:.5px;margin-bottom:6px}}
-.bktab{{margin-top:0;width:100%}} .bktab td{{border:none;padding:3px 8px 3px 0}} .bk{{color:#5B6B7C;width:16%}} .bv{{font-weight:bold;width:34%}} .stamp{{display:inline-block;padding:3px 10px;border-radius:12px;
+.bktab{{margin-top:0;width:100%}} .bktab td{{border:none;padding:4px 18px 4px 0;vertical-align:top;line-height:1.55}} .bname{{font-weight:bold;color:#0F2A47;margin-bottom:2px}} .mm{{margin-top:6px;padding-top:6px;border-top:1px dashed #DCE3EA}} .stamp{{display:inline-block;padding:3px 10px;border-radius:12px;
 font-size:11px;font-weight:bold}} .paid{{background:#DCFCE7;color:#166534}} .partial{{background:#FEF3C7;color:#92400E}}
 .open{{background:#E0E7FF;color:#3730A3}} .void{{background:#FEE2E2;color:#991B1B}}
 """
@@ -111,8 +118,13 @@ def print_invoice(books, inv_id):
              f"{_e(inv['contact'])}<br><span class='muted'>{_e(inv['address'])} {_e(inv['phone'])}</span>"
              f"{'<br>Ref: ' + _e(inv['reference']) if inv['reference'] else ''}</div>"
              f"<div><span class='stamp {inv['status']}'>{status}</span></div></div>{table}")
-    if inv["amount_paid"]:
-        body += f"<tr><td colspan={span} class='r'>Paid</td><td class='r'>({_m(inv['amount_paid'])})</td></tr>"
+    wht = inv["wht"] or 0
+    if wht:
+        body += (f"<tr><td colspan={span} class='r'>Less: withholding tax deducted by customer</td>"
+                 f"<td class='r'>({_m(wht)})</td></tr>")
+    paid = inv["amount_paid"] - wht
+    if paid > 0.004:
+        body += f"<tr><td colspan={span} class='r'>Paid</td><td class='r'>({_m(paid)})</td></tr>"
     body += (f"<tr class='tot'><td colspan={span} class='r'>Balance due</td>"
              f"<td class='r'>{_m(inv['total'] - inv['amount_paid'])}</td></tr></table>")
     pays = books.q("SELECT p.number, p.date, a.amount FROM allocations a JOIN payments p ON p.id=a.payment_id "
@@ -125,7 +137,7 @@ def print_invoice(books, inv_id):
     if sale:
         if inv["status"] != "paid" and co.get("payment_terms"):
             body += f"<p class='muted'>{_e(co['payment_terms'])}</p>"
-        body += _bank_block(co)
+        body += _bank_block(books)
     return _open(f"{title} {inv['number']}", body)
 
 
@@ -140,7 +152,7 @@ def print_quote(books, qid):
         body += f"<p class='muted'>{_e(q['memo'])}</p>"
     body += (f"<p class='muted'>This quotation is valid until {q['valid_until']}. Prices are in {_e(co['currency'])}"
              f"{' and include VAT' if q['vat'] else ''}{' and tourism levy' if q['levy'] else ''}.</p>")
-    body += _bank_block(co)
+    body += _bank_block(books)
     body += "<p style='margin-top:40px'>Accepted by: ______________________ &nbsp; Date: ____________</p>"
     return _open(f"QUOTATION {q['number']}", body)
 
@@ -168,7 +180,7 @@ def print_payment(books, payment_id):
              f"<table><tr><th>Invoice</th><th class='r'>Invoice total</th><th class='r'>Applied now</th>"
              f"<th class='r'>Balance still due</th></tr>{rows}</table>")
     if receipt:
-        body += _bank_block(co)
+        body += _bank_block(books)
     body += "<p style='margin-top:50px'>Signature: ______________________</p>"
     return _open(f"{title} {p['number']}", body)
 
@@ -185,7 +197,7 @@ def print_statement(books, contact_id, start, end):
              f"<td></td><td class='r'>{_m(st['opening'])}</td></tr>{rows}<tr class='tot'><td colspan=4 class='r'>"
              f"Balance due</td><td class='r'>{_m(st['closing'])}</td></tr></table>")
     if c["kind"] == "customer":
-        body += _bank_block(co)
+        body += _bank_block(books)
     return _open(f"STATEMENT {c['name']}", body)
 
 

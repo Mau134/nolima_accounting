@@ -1,7 +1,7 @@
 ; Inno Setup script for Nolima Accounting.
 ; Built by build\build_windows.bat (or the GitHub workflow), which passes /DAppVersion=x.y.z
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0"
 #endif
 #define AppName "Nolima Accounting"
 #define Publisher "Nolima Tech Consultants"

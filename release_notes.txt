@@ -1,13 +1,11 @@
-Nolima Accounting 1.1.0
+Nolima Accounting 1.2.0
 
-- Quotations: create, print and turn a quotation into an invoice in one click (Sales > Quotations).
-- Discounts: a discount % on any line of an invoice, quotation, cash sale or bill.
-- Tourism levy (1%): added automatically to sales and posted to Tourism Levy Payable. Rate in Settings > Company.
-- New report: Tourism levy summary (levy charged, paid and still owed, by month and department).
-- Withholding tax: deduct WHT when paying suppliers (owed to MRA, payable annually) or record WHT withheld by
-  customers. New report: Withholding tax summary.
-- Part payments: take a part payment while creating an invoice; receipts show the balance still due.
-- Bank and mobile money details printed on invoices, quotations, receipts and statements
-  (enter them in Settings > Company).
-- Item codes are now automatic (STK-0001 for stock, SRV-0001 for services).
-- Faster: the dashboard, lists and searching are much quicker, especially with a lot of data.
+- VAT and tourism levy are now calculated on the subtotal and added on top, so they are exactly 16.5% and 1%
+  of the subtotal on every invoice, quotation and cash sale. Prices are always entered before VAT and levy.
+- Bank details: up to three banks plus mobile money, printed on all customer documents
+  (new tab: Settings > Bank details).
+- Withholding tax is typed in by hand on customer invoices: when creating the invoice, or later with
+  Sales > Withholding tax. Invoices show "Less: withholding tax" and the balance the customer still owes.
+  The rate choices were removed from payments.
+- Also in 1.1: quotations, line discounts, 1% tourism levy with its summary report, part payments,
+  automatic item codes and a faster dashboard and lists.

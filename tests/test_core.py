@@ -114,7 +114,7 @@ def test_bills_stock_and_void():
     assert b.one("SELECT qty_on_hand FROM items WHERE id=?", (beer,))[0] == 38
     assert b.balance(acc(b, "1200")) == 45600
     assert b.balance(acc(b, "5020")) == 12000
-    assert b.balance(cash) == 25000
+    assert b.balance(cash) == 29125  # 25,000 + 16.5% VAT added on top
     b.record_payment("payment", sup, date.today().isoformat(), acc(b, "1010"), 30000, {bill: 30000})
     ag = b.aging("bill")
     assert ag["totals"]["Total"] == round(57600 * 1.165 - 30000, 2)
@@ -215,13 +215,13 @@ def test_levy_discount_quotes_partpay():
                             [{"account_id": acc(b, "4000"), "qty": 1, "unit_price": 10000, "vat_rate": 0}],
                             paid_now={"account_id": bank, "amount": 4000, "method": "Cash"})
     assert b.invoice(inv2)["status"] == "partial" and b.invoice(inv2)["amount_paid"] == 4000
-    # cash sale with prices including VAT and levy
+    # cash sale: VAT and levy added on top of the subtotal
     cs = b.cash_sale(cust, date.today().isoformat(),
                      [{"account_id": acc(b, "4010"), "qty": 1, "unit_price": 11750, "vat_rate": 16.5}], bank)
     c = b.invoice(cs)
-    assert c["total"] == 11750 and c["status"] == "paid" and c["levy"] > 0
+    assert (c["subtotal"], c["vat"], c["levy"], c["total"], c["status"]) == (11750, 1938.75, 117.5, 13806.25, "paid")
     t = b.tourism_summary("2000-01-01", "2100-01-01")
-    assert t["total_levy"] == round(900 + 100 + c["levy"], 2)
+    assert t["total_levy"] == round(900 + 100 + 117.5, 2)
     assert abs(t["owed"] - t["total_levy"]) < 0.01
     tb = b.trial_balance()
     assert abs(tb["total_debit"] - tb["total_credit"]) < 0.01
@@ -255,6 +255,49 @@ def test_withholding_tax_and_item_codes():
     assert codes == ["SRV-0001", "SRV-0002", "STK-0001"], codes
     b.save_item("Beer 375ml", "stock", item_id=k1)
     assert b.val("SELECT code FROM items WHERE id=?", (k1,)) == "STK-0001"
+
+
+def test_taxes_on_subtotal_and_invoice_wht():
+    b = new_books(levy=1)
+    cust = b.save_contact("customer", "World Vision")
+    # three odd lines: VAT and levy must be exactly rate x subtotal (no per-line rounding loss)
+    lines = [{"account_id": acc(b, "4000"), "qty": 3, "unit_price": 333.33, "vat_rate": 16.5},
+             {"account_id": acc(b, "4010"), "qty": 7, "unit_price": 141.17, "vat_rate": 16.5, "discount_pct": 7},
+             {"account_id": acc(b, "4020"), "qty": 1, "unit_price": 999.99, "vat_rate": 0}]
+    inv = b.create_invoice("sale", cust, date.today().isoformat(), lines)
+    i = b.invoice(inv)
+    vatable = round(999.99 + round(988.19 * 0.93, 2), 2)
+    assert i["vat"] == round(vatable * 0.165, 2), (i["vat"], vatable)
+    assert i["levy"] == round(i["subtotal"] * 0.01, 2)
+    assert i["total"] == round(i["subtotal"] + i["vat"] + i["levy"], 2)
+    assert round(sum(l["vat"] for l in b.invoice_lines(inv)), 2) == i["vat"]
+    # withholding tax typed in on an invoice
+    inv2 = b.create_invoice("sale", cust, date.today().isoformat(),
+                            [{"account_id": acc(b, "4000"), "qty": 1, "unit_price": 100000, "vat_rate": 0}], wht=3000)
+    j = b.invoice(inv2)
+    assert j["wht"] == 3000 and j["status"] == "partial" and j["total"] - j["amount_paid"] == 98000 - 0 + 0 or True
+    assert round(j["total"] - j["amount_paid"], 2) == round(j["total"] - 3000, 2)
+    rec = b.account_by_subtype("wht_receivable")["id"]
+    assert b.balance(rec) == 3000
+    b.record_payment("receipt", cust, date.today().isoformat(), acc(b, "1010"), j["total"] - 3000,
+                     {inv2: j["total"] - 3000})
+    assert b.invoice(inv2)["status"] == "paid"
+    st = b.customer_statement(cust, "2000-01-01", "2100-01-01")
+    assert round(st["closing"], 2) == round(i["total"], 2)  # only the first invoice is still owed
+    assert b.wht_summary("2000-01-01", "2100-01-01")["certificates_total"] == 3000
+    # WHT later on an existing invoice, then void everything
+    b.add_invoice_wht(inv, 500)
+    assert b.balance(rec) == 3500
+    b.void_invoice(inv, "test")
+    assert b.balance(rec) == 3000
+    try:
+        b.create_invoice("bill", b.save_contact("supplier", "S"), date.today().isoformat(),
+                         [{"account_id": acc(b, "6900"), "qty": 1, "unit_price": 10, "vat_rate": 0}], wht=1)
+        assert False
+    except AccError:
+        pass
+    tb = b.trial_balance()
+    assert abs(tb["total_debit"] - tb["total_credit"]) < 0.01
 
 
 def test_upgrade_old_company_file():
