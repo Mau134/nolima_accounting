@@ -32,6 +32,10 @@ class AccError(Exception):
     """A user-facing validation error."""
 
 
+class InUse(AccError):
+    """A record cannot be deleted because transactions use it; it can be hidden instead."""
+
+
 def r2(x) -> float:
     return round(float(x or 0) + 0.0, 2)
 
@@ -58,7 +62,8 @@ class Books:
                     ("2120", "Tourism Levy Payable", "liability", "tourism_levy"),
                     ("2130", "Withholding Tax Payable (annual)", "liability", "wht_payable")]
     BANK_FIELDS = ["name", "branch", "account_name", "account_no"]
-    DEFAULT_SETTINGS = {"tourism_levy_rate": "1", "quote_prefix": "QUO-", "bank_name": "", "bank_branch": "",
+    DEFAULT_SETTINGS = {"tourism_levy_rate": "1", "quote_prefix": "QUO-", "profit_method": "expense",
+                        "inv_start": "1", "quote_start": "1", "logo_png": "", "bank_name": "", "bank_branch": "",
                         "bank_account_name": "", "bank_account_no": "", "mobile_money": "",
                         **{f"bank{n}_{f}": "" for n in (2, 3) for f in ["name", "branch", "account_name",
                                                                          "account_no"]},
@@ -142,7 +147,7 @@ class Books:
         return self.setting("company_name") is not None
 
     def setup_company(self, name, industry, admin_user, admin_pw, admin_name="", address="", phone="",
-                      email="", tpin="", vat_rate=16.5, fy_start_month=1, currency="MWK"):
+                      email="", tpin="", vat_rate=17.5, fy_start_month=1, currency="MWK"):
         if self.is_setup():
             raise AccError("Company already set up.")
         if not name.strip():
@@ -188,6 +193,39 @@ class Books:
         self.set_setting("mobile_money", mobile_money.strip())
         self.audit("update", "company", None, "bank details")
         self.conn.commit()
+
+    @property
+    def expense_on_purchase(self) -> bool:
+        """'expense': stock bought is an expense straight away (profit = income - expenses).
+        'cogs': stock bought goes to Inventory and becomes cost of sales when sold."""
+        return (self.setting("profit_method", "expense") or "expense") == "expense"
+
+    def set_profit_method(self, method, move_stock=False, d=None):
+        self.require("setup")
+        if method not in ("expense", "cogs"):
+            raise AccError("Unknown profit method.")
+        self.set_setting("profit_method", method)
+        moved = 0.0
+        if method == "expense" and move_stock:
+            moved = self.move_inventory_to_expense(d)
+        self.audit("update", "company", None, f"profit method {method}")
+        self.conn.commit()
+        return moved
+
+    def move_inventory_to_expense(self, d=None):
+        """Move the stock value still held in Inventory into Cost of Goods Sold (one journal)."""
+        self.guard_write("journal")
+        inv = self.account_by_subtype("inventory")["id"]
+        bal = self.balance(inv)
+        if abs(bal) < EPS:
+            return 0.0
+        cogs = self.account_by_subtype("cogs")["id"]
+        lines = ([{"account_id": cogs, "debit": bal}, {"account_id": inv, "credit": bal}] if bal > 0 else
+                 [{"account_id": inv, "debit": -bal}, {"account_id": cogs, "credit": -bal}])
+        self.post_entry(d or today(), "Stock value moved to expenses (profit calculated from expenses)", lines,
+                        "manual", commit=False)
+        self.conn.commit()
+        return bal
 
     @property
     def levy_rate(self) -> float:
@@ -504,6 +542,58 @@ class Books:
         self.conn.commit()
         return contact_id
 
+    def _require_delete(self):
+        self.guard_write("void")
+
+    def delete_contact(self, contact_id):
+        """Delete a customer or supplier that has never been used. Used ones can only be hidden."""
+        self._require_delete()
+        c = self.one("SELECT * FROM contacts WHERE id=?", (contact_id,))
+        if not c:
+            raise AccError("Not found.")
+        used = (self.val("SELECT COUNT(*) FROM invoices WHERE contact_id=?", (contact_id,), 0)
+                + self.val("SELECT COUNT(*) FROM payments WHERE contact_id=?", (contact_id,), 0)
+                + self.val("SELECT COUNT(*) FROM quotes WHERE contact_id=?", (contact_id,), 0))
+        if used:
+            raise InUse(f"{c['name']} has {used} document(s) recorded, so it cannot be deleted. "
+                        "It can be hidden instead: it disappears from lists but its history is kept.")
+        self.conn.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
+        self.audit("delete", c["kind"], contact_id, c["name"])
+        self.conn.commit()
+
+    def delete_item(self, item_id):
+        self._require_delete()
+        it = self.one("SELECT * FROM items WHERE id=?", (item_id,))
+        if not it:
+            raise AccError("Not found.")
+        used = (self.val("SELECT COUNT(*) FROM invoice_lines WHERE item_id=?", (item_id,), 0)
+                + self.val("SELECT COUNT(*) FROM quote_lines WHERE item_id=?", (item_id,), 0)
+                + self.val("SELECT COUNT(*) FROM stock_moves WHERE item_id=?", (item_id,), 0))
+        if used or abs(it["qty_on_hand"] or 0) > EPS:
+            raise InUse(f"{it['name']} has been used in {used} transaction(s) or still has stock, so it cannot be "
+                        "deleted. It can be hidden instead: it disappears from lists but its history is kept.")
+        self.conn.execute("DELETE FROM items WHERE id=?", (item_id,))
+        self.audit("delete", "item", item_id, it["name"])
+        self.conn.commit()
+
+    def delete_quote(self, qid):
+        self._require_delete()
+        q = self.quote(qid)
+        if q["status"] == "invoiced":
+            raise AccError("This quotation has been turned into an invoice and cannot be deleted.")
+        self.conn.execute("DELETE FROM quote_lines WHERE quote_id=?", (qid,))
+        self.conn.execute("DELETE FROM quotes WHERE id=?", (qid,))
+        self.audit("delete", "quote", qid, q["number"])
+        self.conn.commit()
+
+    def set_active(self, table, rid, active):
+        self.guard_write("post")
+        if table not in ("contacts", "items"):
+            raise AccError("Not allowed.")
+        self.conn.execute(f"UPDATE {table} SET active=? WHERE id=?", (1 if active else 0, rid))
+        self.audit("hide" if not active else "restore", table, rid)
+        self.conn.commit()
+
     def contact_balance(self, contact_id):
         kind = self.val("SELECT kind FROM contacts WHERE id=?", (contact_id,))
         k = "sale" if kind == "customer" else "bill"
@@ -579,7 +669,8 @@ class Books:
             raise AccError("Not enough stock on hand for this adjustment.")
         lines = ([{"account_id": inv, "debit": value}, {"account_id": other, "credit": value}] if qty_change > 0
                  else [{"account_id": other, "debit": value}, {"account_id": inv, "credit": value}])
-        eid = self.post_entry(d, f"{memo}: {it['name']}", lines, "stock_adjust", item_id, commit=False) if value else None
+        eid = self.post_entry(d, f"{memo}: {it['name']}", lines, "stock_adjust", item_id, commit=False) \
+            if value and not self.expense_on_purchase else None
         if qty_change > 0:
             self._receive_stock(it, qty_change, cost)
         else:
@@ -596,20 +687,35 @@ class Books:
         self.conn.execute("UPDATE items SET qty_on_hand=?, cost_price=? WHERE id=?", (new_q, avg, it["id"]))
 
     # ------------------------------------------------------------ numbering
+    def _fmt_number(self, prefix, n):
+        return f"{prefix}{n:05d}" if prefix else str(n)
+
     def next_number(self, kind):
+        """Next document number. With no prefix numbers are plain (1878, 1879...).
+        Invoices and quotations can start from a chosen number (Settings > Company > Numbering)."""
         prefix = {"sale": self.setting("inv_prefix", "INV-"), "bill": self.setting("bill_prefix", "BILL-"),
                   "receipt": self.setting("rcpt_prefix", "RCT-"), "payment": self.setting("pay_prefix", "PAY-"),
-                  "quote": self.setting("quote_prefix", "QUO-")}[kind]
+                  "quote": self.setting("quote_prefix", "QUO-")}[kind] or ""
         if kind == "quote":
-            n = self.val("SELECT COUNT(*) FROM quotes", default=0) + 1
-            while self.one("SELECT 1 FROM quotes WHERE number=?", (f"{prefix}{n:05d}",)):
-                n += 1
-            return f"{prefix}{n:05d}"
-        table = "invoices" if kind in ("sale", "bill") else "payments"
-        n = self.val(f"SELECT COUNT(*) FROM {table} WHERE kind=?", (kind,), 0) + 1
-        while self.one(f"SELECT 1 FROM {table} WHERE kind=? AND number=?", (kind, f"{prefix}{n:05d}")):
+            table, where, args = "quotes", "1=1", []
+        else:
+            table, where, args = ("invoices" if kind in ("sale", "bill") else "payments"), "kind=?", [kind]
+        n = self.val(f"SELECT COUNT(*) FROM {table} WHERE {where}", args, 0) + 1
+        start_key = {"sale": "inv_start", "quote": "quote_start"}.get(kind)
+        if start_key:
+            try:
+                n = max(n, int(self.setting(start_key, 1) or 1))
+            except ValueError:
+                pass
+            # continue after the highest plain number already used with this prefix
+            for (num,) in self.conn.execute(f"SELECT number FROM {table} WHERE {where} AND number LIKE ?",
+                                            args + [prefix + "%"]):
+                tail = num[len(prefix):]
+                if tail.isdigit():
+                    n = max(n, int(tail) + 1)
+        while self.one(f"SELECT 1 FROM {table} WHERE {where} AND number=?", args + [self._fmt_number(prefix, n)]):
             n += 1
-        return f"{prefix}{n:05d}"
+        return self._fmt_number(prefix, n)
 
     # ------------------------------------------------------------ invoices & bills
     def _calc_lines(self, lines, prices_inc_vat=False, levy_rate=0.0):
@@ -706,8 +812,10 @@ class Books:
                 acc = l.get("account_id") or (item["income_account_id"] if item else None) or \
                     self.one("SELECT id FROM accounts WHERE type='income' AND active=1 ORDER BY code")["id"]
             else:
-                if item and item["kind"] == "stock":
+                if item and item["kind"] == "stock" and not self.expense_on_purchase:
                     acc = self.account_by_subtype("inventory")["id"]
+                elif item and item["kind"] == "stock":
+                    acc = l.get("account_id") or item["expense_account_id"] or self.account_by_subtype("cogs")["id"]
                 else:
                     acc = l.get("account_id") or (item["expense_account_id"] if item else None) or \
                         self.one("SELECT id FROM accounts WHERE code='6900'")["id"]
@@ -721,17 +829,18 @@ class Books:
                     unit_cost = r2(l["net"] / l["qty"])
             self.conn.execute(
                 "INSERT INTO invoice_lines(invoice_id,item_id,description,qty,unit_price,vat_rate,account_id,"
-                "department_id,net,vat,unit_cost,discount_pct,discount_amt,levy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "department_id,net,vat,unit_cost,discount_pct,discount_amt,levy,line_date) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (inv_id, l.get("item_id"), l.get("description") or (item["name"] if item else ""), l["qty"],
                  l["unit_price"], l["vat_rate"], acc, l.get("department_id"), l["net"], l["vat"], unit_cost,
-                 l["discount_pct"], l["discount_amt"], l["levy"]))
+                 l["discount_pct"], l["discount_amt"], l["levy"], l.get("line_date") or ""))
             side = "credit" if kind == "sale" else "debit"
             je.append({"account_id": acc, side: l["net"], "department_id": l.get("department_id"),
                        "description": l.get("description", "")})
             if item and item["kind"] == "stock":
                 cost_val = r2(unit_cost * l["qty"])
                 if kind == "sale":
-                    if cost_val:
+                    if cost_val and not self.expense_on_purchase:
                         je.append({"account_id": item["expense_account_id"] or self.account_by_subtype("cogs")["id"],
                                    "debit": cost_val, "department_id": l.get("department_id"),
                                    "description": f"Cost of {item['name']}"})
@@ -876,10 +985,10 @@ class Books:
             acc = l.get("account_id") or (item["income_account_id"] if item else None)
             self.conn.execute(
                 "INSERT INTO quote_lines(quote_id,item_id,description,qty,unit_price,discount_pct,discount_amt,"
-                "vat_rate,account_id,department_id,net,vat,levy) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "vat_rate,account_id,department_id,net,vat,levy,line_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (qid, l.get("item_id"), l.get("description") or (item["name"] if item else ""), l["qty"],
                  l["unit_price"], l["discount_pct"], l["discount_amt"], l["vat_rate"], acc, l.get("department_id"),
-                 l["net"], l["vat"], l["levy"]))
+                 l["net"], l["vat"], l["levy"], l.get("line_date") or ""))
         self.audit("create", "quote", qid, f"{number} {t['total']:,.2f}")
         self.conn.commit()
         return qid
@@ -922,7 +1031,8 @@ class Books:
             raise AccError(f"A {q['status']} quotation cannot be invoiced.")
         lines = [{"item_id": l["item_id"], "account_id": l["account_id"], "description": l["description"],
                   "qty": l["qty"], "unit_price": l["unit_price"], "discount_pct": l["discount_pct"],
-                  "vat_rate": l["vat_rate"], "department_id": l["department_id"]} for l in self.quote_lines(qid)]
+                  "vat_rate": l["vat_rate"], "department_id": l["department_id"], "line_date": l["line_date"]}
+                 for l in self.quote_lines(qid)]
         inv_id = self.create_invoice("sale", q["contact_id"], d or today(), lines, due_date=due_date,
                                      memo=q["memo"] or "", reference=q["reference"] or q["number"],
                                      prices_inc_vat=bool(q["prices_inc_vat"]), apply_levy=bool(q["apply_levy"]))

@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS reconciliations (
 # columns added after version 1; added to older company files on open
 COLUMNS = {
     "invoice_lines": [("discount_pct", "REAL DEFAULT 0"), ("discount_amt", "REAL DEFAULT 0"),
-                      ("levy", "REAL DEFAULT 0")],
+                      ("levy", "REAL DEFAULT 0"), ("line_date", "TEXT DEFAULT ''")],
+    "quote_lines": [("line_date", "TEXT DEFAULT ''")],
     "invoices": [("discount", "REAL DEFAULT 0"), ("levy", "REAL DEFAULT 0"), ("wht", "REAL DEFAULT 0")],
     "payments": [("wht", "REAL DEFAULT 0")],
 }

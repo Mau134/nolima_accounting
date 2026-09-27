@@ -146,7 +146,7 @@ class App:
         v = {k: tk.StringVar() for k in ("name", "industry", "address", "phone", "email", "tpin", "vat", "fy",
                                          "admin_name", "user", "pw", "pw2")}
         v["industry"].set(list(INDUSTRY)[0])
-        v["vat"].set("16.5")
+        v["vat"].set("17.5")
         v["fy"].set("January")
         v["user"].set(C.DEFAULT_ADMIN_USER)
         v["pw"].set(C.DEFAULT_ADMIN_PASSWORD)

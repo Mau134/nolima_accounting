@@ -222,12 +222,14 @@ class FormDialog(Dialog):
         super().__init__(parent, title, width)
         self.vars, self.widgets, self.fields = {}, {}, fields
         self.on_submit = on_submit
-        for r, fld in enumerate(fields):
+        per_col = (len(fields) + 1) // 2 if len(fields) > 10 else len(fields)  # long forms: two columns
+        for n, fld in enumerate(fields):
+            r, block = n % per_col, n // per_col
             key, label, kind = fld[0], fld[1], fld[2]
             options = fld[3] if len(fld) > 3 else None
             default = fld[4] if len(fld) > 4 else None
-            ttk.Label(self.body, text=label, style="CardMuted.TLabel").grid(row=r, column=0, sticky="nw", pady=5,
-                                                                             padx=(0, 12))
+            ttk.Label(self.body, text=label, style="CardMuted.TLabel", wraplength=230).grid(
+                row=r, column=2 * block, sticky="nw", pady=5, padx=(24 if block else 0, 12))
             if kind == "check":
                 v = tk.BooleanVar(value=bool(default))
                 w = ttk.Checkbutton(self.body, variable=v, style="Card.TCheckbutton")
@@ -254,9 +256,11 @@ class FormDialog(Dialog):
                     w.state(["readonly"])
                 if kind == "date" and not default:
                     v.set(date.today().isoformat())
-            w.grid(row=r, column=1, sticky="ew", pady=5)
+            w.grid(row=r, column=2 * block + 1, sticky="ew", pady=5)
             self.vars[key], self.widgets[key] = v, w
         self.body.columnconfigure(1, weight=1)
+        if per_col < len(fields):
+            self.body.columnconfigure(3, weight=1)
         ttk.Button(self.buttons, text=ok_text, style="Primary.TButton", command=self._ok).pack(side="right")
         ttk.Button(self.buttons, text="Cancel", command=self.destroy).pack(side="right", padx=8)
         self.bind("<Return>", lambda e: self._ok() if not isinstance(e.widget, tk.Text) else None)
@@ -332,7 +336,7 @@ class LinesEditor(ttk.Frame):
         row = ttk.Frame(self, style="Card.TFrame")
         row.pack(fill="x", pady=(0, 6))
         self.v = {k: tk.StringVar() for k in ("item", "desc", "acct", "qty", "price", "vat", "dept", "dr", "cr",
-                                              "disc")}
+                                              "disc", "ldate")}
         col = 0
 
         def add(label, widget, width=None):
@@ -343,12 +347,14 @@ class LinesEditor(ttk.Frame):
 
         if self.item_opts:
             cb = ttk.Combobox(row, textvariable=self.v["item"], values=[o[1] for o in self.item_opts],
-                              state="readonly", width=15)
+                              state="readonly", width=12)
             cb.bind("<<ComboboxSelected>>", self._item_chosen)
             add("Item", cb)
-        add("Description", ttk.Entry(row, textvariable=self.v["desc"], width=15))
+        if mode == "sale":
+            add("Date", ttk.Entry(row, textvariable=self.v["ldate"], width=9))
+        add("Description", ttk.Entry(row, textvariable=self.v["desc"], width=13))
         add("Account", ttk.Combobox(row, textvariable=self.v["acct"], values=[o[1] for o in self.acct_opts],
-                                    state="readonly", width=19))
+                                    state="readonly", width=14 if mode == "sale" else 19))
         if mode == "journal":
             add("Debit", ttk.Entry(row, textvariable=self.v["dr"], width=12))
             add("Credit", ttk.Entry(row, textvariable=self.v["cr"], width=12))
@@ -357,7 +363,7 @@ class LinesEditor(ttk.Frame):
             add("VAT", ttk.Combobox(row, textvariable=self.v["vat"], values=self.vat_opts, width=7, state="readonly"))
         else:
             add("Qty", ttk.Entry(row, textvariable=self.v["qty"], width=6))
-            add("Unit price", ttk.Entry(row, textvariable=self.v["price"], width=10))
+            add("Unit price", ttk.Entry(row, textvariable=self.v["price"], width=9))
             add("Disc %", ttk.Entry(row, textvariable=self.v["disc"], width=5))
             add("VAT", ttk.Combobox(row, textvariable=self.v["vat"], values=self.vat_opts, width=7, state="readonly"))
         if self.show_depts:
@@ -374,7 +380,8 @@ class LinesEditor(ttk.Frame):
             cols = [("acct", "Account", 240, "w"), ("desc", "Description", 200, "w"), ("amt", "Amount", 110, "e"),
                     ("vat", "VAT", 60, "center")]
         else:
-            cols = [("desc", "Description", 220, "w"), ("acct", "Account", 200, "w"), ("qty", "Qty", 60, "e"),
+            cols = ([("ldate", "Date", 90, "w")] if mode == "sale" else []) + \
+                   [("desc", "Description", 220, "w"), ("acct", "Account", 200, "w"), ("qty", "Qty", 60, "e"),
                     ("price", "Unit price", 100, "e"), ("disc", "Disc", 60, "e"), ("vat", "VAT", 60, "center"),
                     ("amt", "Amount", 110, "e")]
         if self.show_depts:
@@ -433,7 +440,8 @@ class LinesEditor(ttk.Frame):
                     raise ValueError("Quantity must be greater than zero.")
                 if not 0 <= disc <= 100:
                     raise ValueError("Discount must be between 0 and 100 percent.")
-                line.update(qty=qty, unit_price=price, vat_rate=rate, discount_pct=disc)
+                line.update(qty=qty, unit_price=price, vat_rate=rate, discount_pct=disc,
+                            line_date=self.v["ldate"].get().strip())
         except ValueError as exc:
             error(self, exc)
             return
@@ -460,7 +468,8 @@ class LinesEditor(ttk.Frame):
                 r = [acct, l["description"], money(l["amount"]), f"{l['vat_rate']:g}%"]
             else:
                 d = l.get("discount_pct") or 0
-                r = [l["description"], acct, f"{l['qty']:g}", money(l["unit_price"]), f"{d:g}%" if d else "",
+                r = ([l.get("line_date", "")] if self.mode == "sale" else []) + \
+                    [l["description"], acct, f"{l['qty']:g}", money(l["unit_price"]), f"{d:g}%" if d else "",
                      f"{l['vat_rate']:g}%", money(l["qty"] * l["unit_price"] * (1 - d / 100))]
             if self.show_depts:
                 r.append(dept)

@@ -27,11 +27,12 @@ def make_key(plan="business", months=1, machine=None, start=None, serial=1):
     return licensing.encode_key(payload, PRIV.sign(payload))
 
 
-def new_books(industry="Hospitality (hotel, lodge, restaurant)", status=None, levy=0):
+def new_books(industry="Hospitality (hotel, lodge, restaurant)", status=None, levy=0, method="cogs"):
     d = tempfile.mkdtemp()
     b = Books(Path(d) / "t.nacc", status)
     b.setup_company("Thunzi Executive Lodge", industry, "admin", "secret123", tpin="12345678")
     b.set_setting("tourism_levy_rate", levy)
+    b.set_setting("profit_method", method)
     b.login("admin", "secret123")
     return b
 
@@ -296,6 +297,67 @@ def test_taxes_on_subtotal_and_invoice_wht():
         assert False
     except AccError:
         pass
+    tb = b.trial_balance()
+    assert abs(tb["total_debit"] - tb["total_credit"]) < 0.01
+
+
+def test_profit_from_expenses_delete_and_numbering():
+    from nolima_acc.services import InUse
+    b = new_books(method="expense")
+    sup = b.save_contact("supplier", "Carlsberg")
+    cust = b.save_contact("customer", "Walk-in")
+    beer = b.save_item("Beer", "stock", sale_price=2500, income_account_id=acc(b, "4020"),
+                       expense_account_id=acc(b, "5020"))
+    b.create_invoice("bill", sup, date.today().isoformat(),
+                     [{"item_id": beer, "qty": 100, "unit_price": 1200, "vat_rate": 0}])
+    assert b.balance(acc(b, "1200")) == 0            # nothing parked in Inventory
+    assert b.balance(acc(b, "5020")) == 120000       # bought = expensed
+    assert b.one("SELECT qty_on_hand FROM items WHERE id=?", (beer,))[0] == 100
+    b.cash_sale(cust, date.today().isoformat(), [{"item_id": beer, "qty": 10, "unit_price": 2500, "vat_rate": 0}],
+                acc(b, "1000"))
+    assert b.balance(acc(b, "5020")) == 120000       # no extra cost at sale
+    assert b.one("SELECT qty_on_hand FROM items WHERE id=?", (beer,))[0] == 90
+    pl = b.profit_loss("2000-01-01", "2100-01-01")
+    assert pl["net_profit"] == 25000 - 120000
+    b.adjust_stock(beer, -5, memo="Breakages")
+    assert b.one("SELECT qty_on_hand FROM items WHERE id=?", (beer,))[0] == 85
+    # switching an older company: stock value moves to expenses in one journal
+    c = new_books(method="cogs")
+    s2 = c.save_contact("supplier", "S")
+    it = c.save_item("Soda", "stock", expense_account_id=acc(c, "5020"))
+    c.create_invoice("bill", s2, date.today().isoformat(), [{"item_id": it, "qty": 10, "unit_price": 500, "vat_rate": 0}])
+    assert c.balance(acc(c, "1200")) == 5000
+    assert c.set_profit_method("expense", move_stock=True) == 5000
+    assert c.balance(acc(c, "1200")) == 0 and c.balance(acc(c, "5000")) == 5000
+    # deleting
+    spare = b.save_contact("customer", "Never used")
+    b.delete_contact(spare)
+    assert not b.one("SELECT 1 FROM contacts WHERE id=?", (spare,))
+    try:
+        b.delete_contact(cust); assert False
+    except InUse:
+        b.set_active("contacts", cust, False)
+    assert cust not in [x["id"] for x in b.contacts("customer")]
+    unused = b.save_item("Old menu item", "service")
+    b.delete_item(unused)
+    try:
+        b.delete_item(beer); assert False
+    except InUse:
+        pass
+    q = b.create_quote(b.save_contact("customer", "Q"), date.today().isoformat(),
+                       [{"account_id": acc(b, "4000"), "qty": 1, "unit_price": 10, "vat_rate": 0}])
+    b.delete_quote(q)
+    # numbering: plain numbers continuing from 1878
+    b.set_setting("quote_prefix", ""); b.set_setting("quote_start", "1878")
+    b.set_setting("inv_prefix", ""); b.set_setting("inv_start", "5001")
+    q1 = b.create_quote(cust, date.today().isoformat(), [{"account_id": acc(b, "4000"), "qty": 1, "unit_price": 1,
+                                                          "vat_rate": 0, "line_date": "21/09/2026"}])
+    q2 = b.create_quote(cust, date.today().isoformat(), [{"account_id": acc(b, "4000"), "qty": 1, "unit_price": 1,
+                                                          "vat_rate": 0}])
+    assert (b.quote(q1)["number"], b.quote(q2)["number"]) == ("1878", "1879")
+    assert b.quote_lines(q1)[0]["line_date"] == "21/09/2026"
+    inv = b.convert_quote(q1)
+    assert b.invoice(inv)["number"] == "5001" and b.invoice_lines(inv)[0]["line_date"] == "21/09/2026"
     tb = b.trial_balance()
     assert abs(tb["total_debit"] - tb["total_credit"]) < 0.01
 

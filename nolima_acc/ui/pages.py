@@ -5,7 +5,7 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 
 from .. import config as C, licensing, plans, printing
-from ..services import ROLES, AccError, export_csv
+from ..services import ROLES, AccError, InUse, export_csv
 from .dialogs import (ExpenseDialog, InvoiceDialog, JournalDialog, PaymentDialog, ReconcileDialog,
                       contact_form)
 from .theme import f, money
@@ -39,6 +39,21 @@ class Page(ttk.Frame):
 
     def refresh(self):
         pass
+
+    def delete_or_hide(self, name, delete_fn, table, rid):
+        """Delete a record; if it has history, offer to hide it instead."""
+        if not confirm(self, f"Delete {name}? This cannot be undone."):
+            return False
+        try:
+            delete_fn(rid)
+            info(self, f"{name} deleted.")
+            return True
+        except InUse as exc:
+            if confirm(self, f"{exc}\n\nHide {name} now?", "Cannot delete"):
+                self.books.set_active(table, rid, False)
+                info(self, f"{name} is hidden. Tick 'Show hidden' to see it again.")
+                return True
+        return False
 
 
 LIST_LIMIT = 500  # rows shown per list; searching reaches older records
@@ -322,9 +337,14 @@ class DocumentsPage(Page):
 
         def extra3(bar):
             ttk.Button(bar, text="Statement", command=self._safe(self.statement)).pack(side="right", padx=3)
+            ttk.Button(bar, text="Delete", style="Danger.TButton",
+                       command=self._safe(self.delete_contact)).pack(side="right", padx=3)
             ttk.Button(bar, text="Edit", command=self._safe(self.edit_contact)).pack(side="right", padx=3)
+            ttk.Checkbutton(bar, text="Show hidden", variable=self.show_hidden, style="Card.TCheckbutton",
+                            command=self.refresh_contacts).pack(side="left", padx=10)
             ttk.Button(bar, text=f"New {self.ckind}", style="Primary.TButton",
                        command=self._safe(self.new_contact)).pack(side="right", padx=3)
+        self.show_hidden = tk.BooleanVar(value=False)
         self.csearch, _ = search_bar(t3, self.refresh_contacts, extra3)
         self.cons = Table(t3, [("n", "Name", 260, "w"), ("p", "Phone", 140, "w"), ("e", "Email", 220, "w"),
                                ("t", "TPIN", 110, "w"), ("b", "Balance", 130, "e")],
@@ -336,7 +356,7 @@ class DocumentsPage(Page):
             nb.add(t4, text="Quotations")
 
             def extra4(bar):
-                for text, cmd in [("Cancel", lambda: self.quote_status("cancelled")),
+                for text, cmd in [("Delete", self.delete_quote), ("Cancel", lambda: self.quote_status("cancelled")),
                                   ("Declined", lambda: self.quote_status("declined")),
                                   ("Accepted", lambda: self.quote_status("accepted")),
                                   ("Print", self.print_quote), ("Convert to invoice", self.convert_quote)]:
@@ -379,6 +399,12 @@ class DocumentsPage(Page):
     def print_quote(self):
         printing.print_quote(self.books, self._quote())
 
+    def delete_quote(self):
+        q = self.books.quote(self._quote())
+        if confirm(self, f"Delete quotation {q['number']}? This cannot be undone."):
+            self.books.delete_quote(q["id"])
+            self.refresh_quotes()
+
     def quote_status(self, status):
         self.books.set_quote_status(self._quote(), status)
         self.refresh_quotes()
@@ -410,10 +436,11 @@ class DocumentsPage(Page):
                            tags=[("muted",) if p["status"] == "void" else () for p in ps])
 
     def refresh_contacts(self):
-        cs = self.books.contacts(self.ckind, search=self.csearch.get())
+        cs = self.books.contacts(self.ckind, active_only=not self.show_hidden.get(), search=self.csearch.get())
         bal = self.books.contact_balances(self.ckind)
-        self.cons.set_rows([[c["name"], c["phone"], c["email"], c["tpin"], bal.get(c["id"], 0.0)]
-                            for c in cs], ids=[c["id"] for c in cs])
+        self.cons.set_rows([[c["name"] + ("" if c["active"] else "  (hidden)"), c["phone"], c["email"], c["tpin"],
+                             bal.get(c["id"], 0.0)] for c in cs], ids=[c["id"] for c in cs],
+                           tags=[() if c["active"] else ("muted",) for c in cs])
 
     def _doc(self):
         i = self.docs.selected()
@@ -477,6 +504,14 @@ class DocumentsPage(Page):
         c = dict(self.books.one("SELECT * FROM contacts WHERE id=?", (int(i),)))
         if contact_form(self, self.books, self.ckind, c):
             self.refresh()
+
+    def delete_contact(self):
+        i = self.cons.selected()
+        if not i:
+            raise AccError("Select a contact first.")
+        c = self.books.one("SELECT * FROM contacts WHERE id=?", (int(i),))
+        if self.delete_or_hide(c["name"], self.books.delete_contact, "contacts", c["id"]):
+            self.refresh_contacts()
 
     def statement(self):
         i = self.cons.selected()
@@ -578,12 +613,16 @@ class ItemsPage(Page):
 
     def __init__(self, parent, app):
         super().__init__(parent, app)
+        self.action("Delete", self.delete)
         self.action("Stock adjustment", self.adjust)
         self.action("Edit item", self.edit)
         self.action("New item", self.new, True)
         c = Card(self)
         c.pack(fill="both", expand=True)
-        self.search, _ = search_bar(c, self.refresh)
+        self.show_hidden = tk.BooleanVar(value=False)
+        self.search, _ = search_bar(c, self.refresh, lambda bar: ttk.Checkbutton(
+            bar, text="Show hidden", variable=self.show_hidden, style="Card.TCheckbutton",
+            command=self.refresh).pack(side="left", padx=10))
         self.table = Table(c, [("c", "Code", 90, "w"), ("n", "Name", 260, "w"), ("k", "Type", 80, "w"),
                                ("u", "Unit", 70, "w"), ("sp", "Sale price", 110, "e"), ("cp", "Avg cost", 110, "e"),
                                ("q", "On hand", 90, "e"), ("v", "Stock value", 120, "e")],
@@ -591,8 +630,8 @@ class ItemsPage(Page):
         self.table.pack(fill="both", expand=True)
 
     def refresh(self):
-        its = self.books.items(search=self.search.get())
-        self.table.set_rows([[i["code"], i["name"], i["kind"].title(), i["unit"], i["sale_price"], i["cost_price"],
+        its = self.books.items(active_only=not self.show_hidden.get(), search=self.search.get())
+        self.table.set_rows([[i["code"], i["name"] + ("" if i["active"] else "  (hidden)"), i["kind"].title(), i["unit"], i["sale_price"], i["cost_price"],
                               f"{i['qty_on_hand']:g}" if i["kind"] == "stock" else "",
                               i["qty_on_hand"] * i["cost_price"] if i["kind"] == "stock" else ""] for i in its],
                             ids=[i["id"] for i in its],
@@ -615,9 +654,11 @@ class ItemsPage(Page):
             ("inc", "Income account", "combo", inc, it.get("income_account_id")),
             ("exp", "Cost / expense account", "combo", exp, it.get("expense_account_id")),
             ("vat", "Charge VAT", "check", None, it.get("vatable", 1)),
-            ("reorder", "Reorder level", "number", None, it.get("reorder_level", 0))],
+            ("reorder", "Reorder level", "number", None, it.get("reorder_level", 0)),
+            ("active", "Active (untick to hide)", "check", None, it.get("active", 1))],
             lambda v: self.books.save_item(v["name"], v["kind"], v["code"], v["unit"], v["sale"], v["cost"], v["inc"],
-                                           v["exp"], v["vat"], v["reorder"], item_id=it.get("id"))).show()
+                                           v["exp"], v["vat"], v["reorder"], item_id=it.get("id"),
+                                           active=v["active"])).show()
         if v:
             self.refresh()
 
@@ -629,6 +670,14 @@ class ItemsPage(Page):
         if not i:
             raise AccError("Select an item first.")
         self._form(dict(self.books.one("SELECT * FROM items WHERE id=?", (int(i),))))
+
+    def delete(self):
+        i = self.table.selected()
+        if not i:
+            raise AccError("Select an item first.")
+        it = self.books.one("SELECT * FROM items WHERE id=?", (int(i),))
+        if self.delete_or_hide(it["name"], self.books.delete_item, "items", it["id"]):
+            self.refresh()
 
     def adjust(self):
         i = self.table.selected()
@@ -1091,7 +1140,12 @@ class SettingsPage(Page):
         nb.add(t, text="Company")
         self.co_lbl = ttk.Label(t, text="", style="Card.TLabel", justify="left")
         self.co_lbl.pack(anchor="w")
-        ttk.Button(t, text="Edit company details", command=self._safe(self.edit_company)).pack(anchor="w", pady=10)
+        bar = ttk.Frame(t, style="Card.TFrame")
+        bar.pack(anchor="w", pady=10)
+        ttk.Button(bar, text="Edit company details", style="Primary.TButton",
+                   command=self._safe(self.edit_company)).pack(side="left")
+        ttk.Button(bar, text="Upload logo...", command=self._safe(self.upload_logo)).pack(side="left", padx=6)
+        ttk.Button(bar, text="Remove logo", command=self._safe(self.remove_logo)).pack(side="left")
         # bank details
         t = Card(nb, "Bank details printed on invoices, quotations, receipts and statements")
         nb.add(t, text="Bank details")
@@ -1266,11 +1320,55 @@ class SettingsPage(Page):
             ("email", "Email", "entry", None, co["email"]), ("tpin", "TPIN", "entry", None, co["tpin"]),
             ("vat_rate", "VAT rate (%)", "number", None, co["vat_rate"]),
             ("tourism_levy_rate", "Tourism levy (%) on sales", "number", None, co["tourism_levy_rate"] or 0),
+            ("profit_method", "How profit is calculated", "combo",
+             [("expense", "From expenses: stock is an expense when bought"),
+              ("cogs", "From cost of sales: stock is an expense when sold")],
+             self.books.setting("profit_method", "expense")),
+            ("inv_prefix", "Invoice number prefix (blank = plain numbers)", "entry", None,
+             self.books.setting("inv_prefix", "")),
+            ("inv_start", "Next invoice number (at least)", "entry", None, self.books.setting("inv_start", "1")),
+            ("quote_prefix", "Quotation number prefix (blank = plain numbers)", "entry", None,
+             self.books.setting("quote_prefix", "")),
+            ("quote_start", "Next quotation number (at least)", "entry", None, self.books.setting("quote_start", "1")),
             ("fy_start_month", "Financial year starts", "combo", months, int(co["fy_start_month"] or 1)),
             ("payment_terms", "Payment terms on invoices", "entry", None, co["payment_terms"])],
-            lambda v: self.books.update_company(**v)).show()
+            self._save_company).show()
         if v:
             self.app.refresh()
+
+    def _save_company(self, v):
+        method = v.pop("profit_method")
+        for k in ("inv_start", "quote_start"):
+            if not str(v[k]).strip().isdigit():
+                raise AccError("Next numbers must be whole numbers, for example 1878.")
+        self.books.update_company(**v)
+        if method != self.books.setting("profit_method", "expense"):
+            move = False
+            inv_bal = self.books.balance(self.books.account_by_subtype("inventory")["id"])
+            if method == "expense" and abs(inv_bal) > 0.005:
+                move = confirm(self, f"Stock worth MWK {money(inv_bal)} is still held as Inventory. Move it into "
+                                     "expenses now, so profit is calculated from expenses from today?")
+            self.books.set_profit_method(method, move)
+        return True
+
+    def upload_logo(self):
+        p = filedialog.askopenfilename(parent=self, title="Choose your logo",
+                                       filetypes=[("Images", "*.png *.jpg *.jpeg *.gif *.bmp")])
+        if not p:
+            return
+        import base64
+        import io
+        from PIL import Image
+        im = Image.open(p).convert("RGBA")
+        im.thumbnail((480, 200))
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
+        self.books.set_setting("logo_png", base64.b64encode(buf.getvalue()).decode())
+        info(self, "Logo saved. It now prints on invoices and quotations.")
+
+    def remove_logo(self):
+        self.books.set_setting("logo_png", "")
+        info(self, "Logo removed.")
 
     def new_user(self):
         v = FormDialog(self, "New user", [

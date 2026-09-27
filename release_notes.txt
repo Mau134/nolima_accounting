@@ -1,11 +1,11 @@
-Nolima Accounting 1.2.0
+Nolima Accounting 1.3.0
 
-- VAT and tourism levy are now calculated on the subtotal and added on top, so they are exactly 16.5% and 1%
-  of the subtotal on every invoice, quotation and cash sale. Prices are always entered before VAT and levy.
-- Bank details: up to three banks plus mobile money, printed on all customer documents
-  (new tab: Settings > Bank details).
-- Withholding tax is typed in by hand on customer invoices: when creating the invoice, or later with
-  Sales > Withholding tax. Invoices show "Less: withholding tax" and the balance the customer still owes.
-  The rate choices were removed from payments.
-- Also in 1.1: quotations, line discounts, 1% tourism levy with its summary report, part payments,
-  automatic item codes and a faster dashboard and lists.
+- New invoice and quotation layout, like the lodge's own quotation: logo, Date / Total / Expiration boxes,
+  dates on each line, one TAX line and a TAX SUMMARY showing Ministry of Tourism and MRA together.
+  Upload your logo in Settings > Company.
+- Numbering can continue from your existing numbers (e.g. Quote 1878): Settings > Company.
+- Delete customers, suppliers, items and quotations that have not been used. Records with history
+  can be hidden instead (tick "Show hidden" to see them).
+- Profit is now calculated from expenses: stock bought counts as an expense straight away.
+  Quantities in stock are still tracked. (Settings > Company > How profit is calculated.)
+- VAT default for new companies is 17.5%.

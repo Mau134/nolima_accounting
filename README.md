@@ -1,4 +1,4 @@
-# Nolima Accounting 1.2
+# Nolima Accounting 1.3
 
 ## Default login
 
@@ -25,12 +25,17 @@ printable documents with the company's **bank and mobile money details**, signed
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| VAT rate | 16.5% | Calculated on the subtotal (after discounts) and added on top |
+| VAT rate | 17.5% | Calculated on the subtotal (after discounts) and added on top |
 | Tourism levy | 1% | Calculated on the subtotal and added to every sale; posted to 2120 Tourism Levy Payable. Set 0 for businesses that do not charge it; can be switched off per invoice |
 | Withholding tax | typed in per invoice | Customer invoices only: the amount the customer deducts is entered by hand (on the invoice or later with Sales > Withholding tax). It reduces what the customer owes and is posted to 1160 Withholding Tax Receivable |
 
+| Profit method | From expenses | Stock bought is an expense when bought (profit = income - expenses); quantities are still tracked. Alternative: cost of sales when sold |
+
 Prices are always entered before VAT and levy. Documents print up to three banks plus mobile money
-(Settings > Bank details).
+(Settings > Bank details). Invoices and quotations follow the lodge's own layout: logo, date / total / due-date
+boxes, line dates, one TAX line and a TAX SUMMARY (Ministry of Tourism and MRA). Numbering can continue from
+existing numbers (Settings > Company: blank prefix and "next number", e.g. 1878). Unused customers,
+suppliers, items and quotations can be deleted; used ones can be hidden.
 
 Company files from earlier versions are upgraded automatically when opened: the new accounts, settings and item codes
 are added and nothing existing is changed.
@@ -60,7 +65,7 @@ are added and nothing existing is changed.
    - It creates your signing key in `%USERPROFILE%\NolimaLicenseVault\` and writes the matching
      public key into `nolima_acc/license_pubkey.py`.
    - **Back up the vault folder** (flash disk + cloud). Lose it and you cannot renew existing customers.
-3. Build the installer: double-click `build\build_windows.bat` → `Output\NolimaAccounting-Setup-1.2.0.exe`
+3. Build the installer: double-click `build\build_windows.bat` → `Output\NolimaAccounting-Setup-1.3.0.exe`
    (or let GitHub build it; see **INSTALL.md**, which also covers installing at customers and moving to a new PC)
 
 Commit `license_pubkey.py` to GitHub; never commit the vault folder.

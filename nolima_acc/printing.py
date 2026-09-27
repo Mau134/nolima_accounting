@@ -105,56 +105,157 @@ font-size:11px;font-weight:bold}} .paid{{background:#DCFCE7;color:#166534}} .par
 """
 
 
+DOC_CSS = """
+body{font-family:Helvetica,Arial,sans-serif;color:#111;margin:34px 40px;font-size:13px}
+.top{display:table;width:100%} .top>div{display:table-cell;vertical-align:top}
+.co{width:38%} .co b{font-size:15px} .ttl{text-align:center;font-size:24px;font-weight:600;padding-top:2px}
+.logo{text-align:right;width:30%} .logo img{max-height:70px;max-width:180px}
+hr.rule{border:0;border-top:2px solid #111;margin:28px 0 6px}
+.mid{display:table;width:100%} .mid>div{display:table-cell;vertical-align:top}
+.addr{width:50%;line-height:1.55} .addr .lbl{font-size:11px;font-weight:bold;text-decoration:underline}
+.boxes{border-collapse:collapse;float:right;border-bottom:1px solid #111} .boxes td{padding:12px 22px;
+text-align:center;font-size:14px;line-height:1.5;width:120px} .boxes .g{background:#D0D0D0} .boxes .k{background:#000;
+color:#fff} .boxes .k b{font-size:14px}
+table.ln{width:100%;border-collapse:collapse;margin-top:58px} table.ln th{font-size:11px;text-align:left;padding:8px 4px;
+border-top:1px solid #bbb;border-bottom:1px solid #bbb} table.ln td{padding:6px 4px;vertical-align:top}
+table.ln tr.last td{border-bottom:1px solid #bbb} .r{text-align:right} .c{text-align:center} table.ln th.r,table.ts th.r{text-align:right}
+.tot{width:48%;margin-left:52%;border-collapse:collapse} .tot td{padding:3px 4px} .tot .big td{border-top:1px solid #bbb;
+border-bottom:1px solid #111;padding:14px 4px;font-size:15px} .tot .big td.v{font-size:22px}
+.thanks{text-align:right;margin:10px 0 24px}
+.tsh{font-size:15px;margin-bottom:6px} table.ts{width:100%;border-collapse:collapse} table.ts th{font-size:11px;
+border-top:1px solid #bbb;border-bottom:1px solid #bbb;padding:7px 4px} table.ts td{padding:6px 4px}
+table.ts tr:last-child td{border-bottom:1px solid #bbb}
+.bank{margin-top:22px;border:1px solid #ccc;border-radius:6px;padding:10px 14px} .bt{font-size:11px;font-weight:bold;
+margin-bottom:4px} .bktab{width:100%;border-collapse:collapse} .bktab td{border:none;padding:3px 18px 3px 0;
+vertical-align:top;line-height:1.5} .bname{font-weight:bold} .mm{margin-top:6px;padding-top:6px;border-top:1px dashed #ccc}
+.muted{color:#555} .note{margin-top:14px;color:#333}
+.accept{display:table;width:100%;margin-top:40px} .accept>div{display:table-cell;width:50%;padding-right:30px}
+.accept .line{border-top:1px solid #111;padding-top:4px;margin-top:34px;font-size:12px}
+.foot{margin-top:46px;text-align:center;font-size:11px;line-height:1.5}
+@media print{body{margin:12mm 14mm}}
+"""
+
+
+def _d(iso):
+    """2026-09-16 -> 16/09/2026 (dates on documents are day/month/year)."""
+    try:
+        y, m, dd = str(iso).split("-")
+        return f"{dd}/{m}/{y}"
+    except ValueError:
+        return _e(iso)
+
+
+def _logo(books):
+    b64 = books.setting("logo_png", "") or ""
+    return f"<img src='data:image/png;base64,{b64}'>" if b64 else ""
+
+
+def _tax_rows(books, lines, doc):
+    """Tax summary: tourism levy and VAT together, each with the net it was calculated on."""
+    co = books.company()
+    rows = []
+    if doc["levy"]:
+        rows.append((f"Ministry of Tourism @ {float(co['tourism_levy_rate'] or 0):g}%", doc["levy"], doc["subtotal"]))
+    rates = sorted({l["vat_rate"] for l in lines if l["vat_rate"]})
+    for rate in rates:
+        net = sum(l["net"] for l in lines if l["vat_rate"] == rate)
+        vat = sum(l["vat"] for l in lines if l["vat_rate"] == rate)
+        rows.append((f"Malawi Revenue Authority @ {rate:g}%", vat, net))
+    return rows
+
+
+def _document(books, kind, doc, lines, extra_totals="", after="", accept=False):
+    """Shared layout for invoices and quotations (modelled on the lodge's own quotation)."""
+    co = books.company()
+    number = doc["number"]
+    title = {"quote": "Quote", "sale": "Invoice", "bill": "Supplier bill"}[kind]
+    third_label, third = ("EXPIRATION<br>DATE", doc["valid_until"]) if kind == "quote" else \
+        ("DUE<br>DATE", doc["due_date"])
+    big_label, big = ("TOTAL", doc["total"])
+    if kind != "quote" and (doc["amount_paid"] or 0) > 0.004 and doc["status"] != "void":
+        big_label, big = ("BALANCE DUE", doc["total"] - doc["amount_paid"])
+    addr = "<br>".join(_e(x) for x in [doc["contact"]] + (doc["address"] or "").splitlines() if x)
+    has_disc = any((l["discount_pct"] or 0) for l in lines)
+    has_date = any((l["line_date"] or "") for l in lines)
+    head = ("<tr>" + ("<th>DATE</th>" if has_date else "") + "<th>DESCRIPTION</th><th class='r'>QTY</th>"
+            "<th class='r'>RATE</th>" + ("<th class='r'>DISC.</th>" if has_disc else "") +
+            "<th class='r'>AMOUNT</th></tr>")
+    body = ""
+    for i, l in enumerate(lines):
+        cls = " class='last'" if i == len(lines) - 1 else ""
+        body += (f"<tr{cls}>" + (f"<td>{_e(l['line_date'])}</td>" if has_date else "") +
+                 f"<td>{_e(l['description'])}</td><td class='r'>{l['qty']:g}</td><td class='r'>{_m(l['unit_price'])}</td>"
+                 + (f"<td class='r'>{(l['discount_pct'] or 0):g}%</td>" if has_disc else "") +
+                 f"<td class='r'>{_m(l['net'])}</td></tr>")
+    tax = (doc["vat"] or 0) + (doc["levy"] or 0)
+    tot = ""
+    if doc["discount"]:
+        tot += f"<tr><td>DISCOUNT</td><td class='r'>({_m(doc['discount'])})</td></tr>"
+    tot += (f"<tr><td>SUBTOTAL</td><td class='r'>{_m(doc['subtotal'])}</td></tr>"
+            f"<tr><td>TAX</td><td class='r'>{_m(tax)}</td></tr>" + extra_totals +
+            f"<tr class='big'><td>{'BALANCE DUE' if big_label == 'BALANCE DUE' else 'TOTAL'}</td>"
+            f"<td class='r v'>MK{_m(big)}</td></tr>")
+    ts = _tax_rows(books, lines, doc)
+    tax_html = ""
+    if ts:
+        tax_html = ("<div class='tsh'>TAX SUMMARY</div><table class='ts'><tr><th class='r' style='width:40%'>RATE</th>"
+                    "<th class='r'>TAX</th><th class='r'>NET</th></tr>" +
+                    "".join(f"<tr><td class='r'>{_e(n)}</td><td class='r'>{_m(t)}</td><td class='r'>{_m(net)}</td></tr>"
+                            for n, t, net in ts) + "</table>")
+    foot_bits = [x for x in ["Address| " + " ".join((co["address"] or "").split()) if co["address"] else "",
+                             "Cell:" + co["phone"] if co["phone"] else ""] if x]
+    foot = (f"<div class='foot'>{_e(co['company_name'])}<br>{_e(' | '.join(foot_bits))}"
+            + (f"<br>Email: {_e(co['email'])}" if co["email"] else "") + "</div>")
+    html = (f"<div class='top'><div class='co'><b>{_e(co['company_name'])}</b><br><br>{_e(co['email'])}"
+            + (f"<br>VAT Registration No. {_e(co['tpin'])}" if co["tpin"] else "") + "</div>"
+            f"<div class='ttl'>{title}&nbsp; {_e(number)}</div><div class='logo'>{_logo(books)}</div></div>"
+            f"<hr class='rule'><div class='mid'><div class='addr'><span class='lbl'>"
+            f"{'SUPPLIER' if kind == 'bill' else 'ADDRESS'}</span><br>{addr}"
+            + (f"<br><span class='muted'>Ref: {_e(doc['reference'])}</span>" if doc["reference"] else "") + "</div>"
+            f"<div><table class='boxes'><tr><td class='g'>DATE<br>{_d(doc['date'])}</td>"
+            f"<td class='k'>{big_label}<br><b>MK{_m(big)}</b></td><td class='g'>{third_label}<br>{_d(third)}</td>"
+            f"</tr></table></div></div>"
+            f"<table class='ln'>{head}{body}</table><table class='tot'>{tot}</table>"
+            f"<div class='thanks'>THANK YOU.</div>{tax_html}{after}")
+    if doc["memo"]:
+        html += f"<div class='note'>{_e(doc['memo'])}</div>"
+    if kind != "bill":
+        html += _bank_block(books)
+    if accept:
+        html += ("<div class='accept'><div><div class='line'>Accepted By</div></div>"
+                 "<div><div class='line'>Accepted Date</div></div></div>")
+    html += foot
+    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{title} {_e(number)}</title>"
+            f"<style>{DOC_CSS}</style></head><body>{html}"
+            f"<script>window.onload=()=>setTimeout(()=>window.print(),300)</script></body></html>")
+    path = Path(tempfile.gettempdir()) / f"nolima_{kind}_{number}.html".replace("/", "-")
+    path.write_text(page, encoding="utf-8")
+    webbrowser.open(path.as_uri())
+    return path
+
+
 def print_invoice(books, inv_id):
-    inv, lines, co = books.invoice(inv_id), books.invoice_lines(inv_id), books.company()
-    sale = inv["kind"] == "sale"
-    title = "TAX INVOICE" if sale else "SUPPLIER BILL"
-    if inv["status"] == "paid" and sale and inv["date"] == inv["due_date"]:
-        title = "CASH SALE RECEIPT"
-    status = {"paid": "PAID", "partial": "PART PAID", "open": "UNPAID", "void": "VOID"}[inv["status"]]
-    table, span = _lines_table(co, lines, inv)
-    body = _header(co, title, f"No. {_e(inv['number'])}<br>Date {inv['date']}<br>Due {inv['due_date']}")
-    body += (f"<div class='grid'><div><b>{'Bill to' if sale else 'Supplier'}</b><br>"
-             f"{_e(inv['contact'])}<br><span class='muted'>{_e(inv['address'])} {_e(inv['phone'])}</span>"
-             f"{'<br>Ref: ' + _e(inv['reference']) if inv['reference'] else ''}</div>"
-             f"<div><span class='stamp {inv['status']}'>{status}</span></div></div>{table}")
+    inv, lines = books.invoice(inv_id), books.invoice_lines(inv_id)
+    extra = ""
     wht = inv["wht"] or 0
-    if wht:
-        body += (f"<tr><td colspan={span} class='r'>Less: withholding tax deducted by customer</td>"
-                 f"<td class='r'>({_m(wht)})</td></tr>")
-    paid = inv["amount_paid"] - wht
-    if paid > 0.004:
-        body += f"<tr><td colspan={span} class='r'>Paid</td><td class='r'>({_m(paid)})</td></tr>"
-    body += (f"<tr class='tot'><td colspan={span} class='r'>Balance due</td>"
-             f"<td class='r'>{_m(inv['total'] - inv['amount_paid'])}</td></tr></table>")
-    pays = books.q("SELECT p.number, p.date, a.amount FROM allocations a JOIN payments p ON p.id=a.payment_id "
-                   "WHERE a.invoice_id=? AND p.status<>'void' ORDER BY p.date", (inv_id,))
-    if pays and inv["status"] == "partial":
-        body += ("<p class='muted'>Part payments received: "
-                 + "; ".join(f"{_e(p['number'])} on {p['date']}: {_m(p['amount'])}" for p in pays) + "</p>")
-    if inv["memo"]:
-        body += f"<p class='muted'>{_e(inv['memo'])}</p>"
-    if sale:
-        if inv["status"] != "paid" and co.get("payment_terms"):
-            body += f"<p class='muted'>{_e(co['payment_terms'])}</p>"
-        body += _bank_block(books)
-    return _open(f"{title} {inv['number']}", body)
+    paid = (inv["amount_paid"] or 0) - wht
+    if inv["status"] != "void" and (wht or paid > 0.004):
+        extra += f"<tr><td>TOTAL</td><td class='r'>{_m(inv['total'])}</td></tr>"
+        if wht:
+            extra += f"<tr><td>LESS WITHHOLDING TAX</td><td class='r'>({_m(wht)})</td></tr>"
+        if paid > 0.004:
+            extra += f"<tr><td>PAID</td><td class='r'>({_m(paid)})</td></tr>"
+    after = ""
+    if inv["status"] == "void":
+        after = "<div class='note'><b>VOID</b> - this invoice has been cancelled.</div>"
+    elif inv["kind"] == "sale" and inv["status"] != "paid" and books.setting("payment_terms", ""):
+        after = f"<div class='note muted'>{_e(books.setting('payment_terms', ''))}</div>"
+    return _document(books, inv["kind"], inv, lines, extra, after)
 
 
 def print_quote(books, qid):
-    q, lines, co = books.quote(qid), books.quote_lines(qid), books.company()
-    table, span = _lines_table(co, lines, q)
-    body = _header(co, "QUOTATION", f"No. {_e(q['number'])}<br>Date {q['date']}<br>Valid until {q['valid_until']}")
-    body += (f"<div class='grid'><div><b>Prepared for</b><br>{_e(q['contact'])}<br>"
-             f"<span class='muted'>{_e(q['address'])} {_e(q['phone'])}</span>"
-             f"{'<br>Ref: ' + _e(q['reference']) if q['reference'] else ''}</div></div>{table}</table>")
-    if q["memo"]:
-        body += f"<p class='muted'>{_e(q['memo'])}</p>"
-    body += (f"<p class='muted'>This quotation is valid until {q['valid_until']}. Prices are in {_e(co['currency'])}"
-             f"{' and include VAT' if q['vat'] else ''}{' and tourism levy' if q['levy'] else ''}.</p>")
-    body += _bank_block(books)
-    body += "<p style='margin-top:40px'>Accepted by: ______________________ &nbsp; Date: ____________</p>"
-    return _open(f"QUOTATION {q['number']}", body)
+    q, lines = books.quote(qid), books.quote_lines(qid)
+    return _document(books, "quote", q, lines, accept=True)
 
 
 def print_payment(books, payment_id):
